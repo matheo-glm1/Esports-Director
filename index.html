@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Esports Director</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="stylesheet" href="style.css?v=200">
+</head>
+<body>
+
+<!-- ================= MAIN MENU ================= -->
+<section id="screen-mainmenu" class="screen active">
+  <div class="menu-content">
+    <div class="menu-brand">
+      <h1 class="menu-title">Esports<span>Director</span></h1>
+      <p class="menu-subtitle" data-i18n="menu.subtitle">Bâtissez l'organisation eSport de référence</p>
+      <div class="menu-footer">V0.3.3</div>
+    </div>
+    <nav class="menu-nav">
+      <button class="menu-btn" id="btnContinue"><span class="menu-btn-icon"><i class="fa-solid fa-play"></i></span><span data-i18n="menu.nav.continue">Continuer</span></button>
+      <button class="menu-btn menu-btn-primary" id="btnNewGame"><span class="menu-btn-icon"><i class="fa-solid fa-plus"></i></span><span data-i18n="menu.nav.newGame">Nouvelle Partie</span></button>
+      <button class="menu-btn" id="btnLoadGame"><span class="menu-btn-icon"><i class="fa-solid fa-folder-open"></i></span><span data-i18n="menu.nav.loadGame">Charger une Partie</span></button>
+      <button class="menu-btn disabled" id="btnMultiplayer" title="Bientôt disponible" data-i18n-attr-title="menu.nav.multiplayer.tooltip"><span class="menu-btn-icon"><i class="fa-solid fa-users"></i></span><span data-i18n="menu.nav.multiplayer">Multijoueur</span></button>
+      <button class="menu-btn" id="btnOptions"><span class="menu-btn-icon"><i class="fa-solid fa-gear"></i></span><span data-i18n="menu.nav.options">Options</span></button>
+      <button class="menu-btn menu-btn-danger" id="btnQuit"><span class="menu-btn-icon"><i class="fa-solid fa-power-off"></i></span><span data-i18n="menu.nav.quit">Quitter le Jeu</span></button>
+    </nav>
+  </div>
+  <div class="mainmenu-patchnotes" id="mainmenuPatchnotes" role="button" tabindex="0" title="Voir le patch en entier">
+    <div class="mainmenu-patchnotes-head">
+      <i class="fa-solid fa-code-branch"></i>
+      <span data-i18n="menu.patchnotes.title">Notes de mise à jour</span>
+      <span class="mainmenu-patchnotes-version">V0.3.3</span>
+    </div>
+    <ul class="mainmenu-patchnotes-list">
+      <li data-i18n="menu.patchnotes.item1">Nouveau système de stratégie pour Rocket Champ : style d'équipe manuel (effet réel sur les matchs) et priorisation d'un attribut à l'entraînement</li>
+      <li data-i18n="menu.patchnotes.item2">Correction d'un bug d'affichage du sélecteur de section dans la barre latérale (menu tronqué/mal positionné)</li>
+      <li data-i18n="menu.patchnotes.item3">Ranked Valostrike rendu cohérent : le haut du ladder est maintenant dominé par de vrais pros signés en équipe VST International, plus par des agents libres au hasard</li>
+      <li data-i18n="menu.patchnotes.item4">Système de capitaine pour Rocket Champ : à désigner depuis la fiche d'un joueur, avec note de leadership et bonus d'équipe</li>
+    </ul>
+  </div>
+  <a href="https://discord.gg/FkKsPQpT5C" target="_blank" class="menu-discord-badge" title="Rejoindre le Discord" data-i18n-attr-title="menu.discord.tooltip">
+    <i class="fa-brands fa-discord"></i><span>Discord</span>
+  </a>
+</section>
+
+<!-- ================= NEW GAME ================= -->
+<section id="screen-newgame" class="screen">
+  <div class="newgame-wrap">
+    <button class="back-btn" id="btnBackFromNewGame"><i class="fa-solid fa-arrow-left"></i> <span data-i18n="common.back">Retour</span></button>
+    <div class="newgame-header">
+      <h2 data-i18n="newgame.title">Créer votre organisation</h2>
+      <p data-i18n="newgame.subtitle">Définissez l'identité qui portera vos couleurs sur la scène eSport mondiale</p>
+    </div>
+
+    <div class="card ng-card ng-card-tight">
+      <label class="field-label" style="margin-top:0;" data-i18n="newgame.field.difficulty">Niveau de départ</label>
+      <div class="difficulty-grid" id="difficultyGrid"></div>
+      <div id="customLevelPanel" style="display:none;"></div>
+    </div>
+
+    <div class="newgame-grid newgame-grid-2">
+      <div class="card ng-card ng-card-tight">
+        <label class="field-label" style="margin-top:0;" data-i18n="newgame.field.orgName">Nom de la structure</label>
+        <div class="logo-upload-row" style="margin-bottom:10px;">
+          <input type="text" id="orgName" class="field-input" placeholder="Ex : Phoenix Esports" maxlength="24" style="flex:1;" data-i18n-attr-placeholder="newgame.field.orgNamePlaceholder">
+          <button type="button" class="btn btn-sm" id="btnRandomOrgName" title="Générer un nom aléatoire" data-i18n-attr-title="newgame.randomName.tooltip"><i class="fa-solid fa-dice"></i></button>
+        </div>
+
+        <label class="field-label" data-i18n="newgame.field.orgTag">Diminutif (2-3 lettres)</label>
+        <input type="text" id="orgTag" class="field-input field-tag" placeholder="PHX" maxlength="3">
+
+        <label class="field-label">Pays de la structure</label>
+        <select id="orgCountry" class="field-input"></select>
+
+        <label class="field-label" data-i18n="newgame.field.colors">Couleur</label>
+        <div class="color-picker-panel">
+          <div class="color-row" id="colorRow"></div>
+          <input type="color" id="addSwatchPicker" style="position:absolute;opacity:0;width:0;height:0;pointer-events:none;">
+          <div class="color-picker-divider"></div>
+          <div class="color-row-custom">
+            <input type="color" id="customColorPicker" class="custom-color-picker" title="Choisir une couleur personnalisée" data-i18n-attr-title="newgame.color.customTooltip">
+            <div class="custom-color-hex-wrap">
+              <span class="custom-color-hash">#</span>
+              <input type="text" id="customColorHex" class="field-input custom-color-hex" placeholder="5B8CFF" maxlength="6">
+            </div>
+          </div>
+        </div>
+
+        <label class="field-label">Blason</label>
+        <div class="ng-logo-row">
+          <span id="ngLogoPreviewSlot"></span>
+          <button type="button" class="btn btn-sm" id="btnOpenIdentityForge"><i class="fa-solid fa-shield-halved"></i> Personnaliser le blason</button>
+        </div>
+      </div>
+
+      <div class="card ng-card ng-card-tight" id="ngGameCard">
+        <label class="field-label" style="margin-top:0;" data-i18n="newgame.field.firstSection">Première section eSport</label>
+        <div class="game-grid game-grid-vertical" id="gameGrid"></div>
+        <div class="vct-slot-status" id="vctSlotStatus"></div>
+        <div class="vct-slot-status" id="lolLeagueStatus"></div>
+        <div class="vct-slot-status" id="gcRegionStatus"></div>
+      </div>
+    </div>
+
+    <div class="newgame-footer-row">
+      <button class="cta-btn" id="btnCreateOrg"><span data-i18n="newgame.create">Créer mon organisation</span> <i class="fa-solid fa-arrow-right"></i></button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= OPTIONS ================= -->
+<section id="screen-options" class="screen">
+  <div class="options-wrap">
+    <button class="back-btn" id="btnBackFromOptions"><i class="fa-solid fa-arrow-left"></i> <span data-i18n="common.back">Retour</span></button>
+    <div class="options-header">
+      <span class="options-header-icon"><i class="fa-solid fa-sliders"></i></span>
+      <h2 data-i18n="options.title">Options</h2>
+      <p data-i18n="options.subtitle">Personnalisez entièrement votre expérience Esports Director</p>
+    </div>
+
+    <div class="options-layout">
+      <nav class="options-tabs" id="optionsTabs">
+        <button class="options-tab" data-tab="audio"><i class="fa-solid fa-volume-high"></i><span data-i18n="options.tab.audio">Audio</span></button>
+        <button class="options-tab" data-tab="graphics"><i class="fa-solid fa-display"></i><span data-i18n="options.tab.graphics">Graphiques</span></button>
+        <button class="options-tab" data-tab="interface"><i class="fa-solid fa-swatchbook"></i><span data-i18n="options.tab.interface">Interface</span></button>
+        <button class="options-tab" data-tab="language"><i class="fa-solid fa-globe"></i><span data-i18n="options.tab.language">Langue</span></button>
+        <button class="options-tab" data-tab="accessibility"><i class="fa-solid fa-universal-access"></i><span data-i18n="options.tab.accessibility">Accessibilité</span></button>
+        <button class="options-tab" data-tab="system"><i class="fa-solid fa-database"></i><span data-i18n="options.tab.system">Système</span></button>
+        <button class="options-tab" data-tab="cheat"><i class="fa-solid fa-money-bill-wave"></i><span data-i18n="options.tab.cheat">Développeur</span></button>
+      </nav>
+      <div class="options-panel card" id="optionsPanel"></div>
+    </div>
+
+    <div class="options-actions">
+      <button class="btn btn-danger" id="btnOptionsReset"><i class="fa-solid fa-rotate-left"></i> <span data-i18n="options.actions.reset">Réinitialiser</span></button>
+      <div class="options-actions-spacer"></div>
+      <button class="btn" id="btnOptionsCancel" data-i18n="common.cancel">Annuler</button>
+      <button class="btn btn-primary" id="btnOptionsApply"><i class="fa-solid fa-check"></i> <span data-i18n="options.actions.apply">Appliquer</span></button>
+    </div>
+  </div>
+</section>
+
+<!-- Filtres SVG d'assistance daltonisme (accessibilité) -->
+<svg width="0" height="0" style="position:absolute;">
+  <defs>
+    <filter id="filter-protanopia">
+      <feColorMatrix type="matrix" values="0.567,0.433,0,0,0  0.558,0.442,0,0,0  0,0.242,0.758,0,0  0,0,0,1,0"/>
+    </filter>
+    <filter id="filter-deuteranopia">
+      <feColorMatrix type="matrix" values="0.625,0.375,0,0,0  0.7,0.3,0,0,0  0,0.3,0.7,0,0  0,0,0,1,0"/>
+    </filter>
+    <filter id="filter-tritanopia">
+      <feColorMatrix type="matrix" values="0.95,0.05,0,0,0  0,0.433,0.567,0,0  0,0.475,0.525,0,0  0,0,0,1,0"/>
+    </filter>
+  </defs>
+</svg>
+
+<!-- ================= DASHBOARD ================= -->
+<section id="screen-dashboard" class="screen">
+  <button class="burger-btn" id="burgerBtn"><i class="fa-solid fa-bars"></i></button>
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <aside id="sidebar" style="display:none;"></aside>
+
+  <div class="main-area">
+    <header class="topbar">
+      <div class="sidebar-brand">
+        <span id="sbOrgLogo" class="sidebar-org-logo"></span>
+        <div class="sidebar-brand-text">
+          <div class="sidebar-org-name" id="sbOrgName">Organisation</div>
+          <div class="sidebar-org-tag" id="sbOrgTag">TAG</div>
+        </div>
+      </div>
+
+      <div id="sidebarMainNav">
+        <!-- Refonte "façon FM" : au lieu d'aligner 12 onglets à plat (ce qui
+             débordait et se coupait sur les écrans plus étroits — voir
+             screenshot signalé), les destinations secondaires sont
+             regroupées sous 3 menus déroulants (Club / Finances / Effectif),
+             chacun ouvert via son chevron, sur le modèle de
+             .sidebar-section-switch-menu déjà utilisé plus bas dans l'appli.
+             Général et Transferts restent des accès directs, comme "Portal"
+             et "Recruitment" dans la référence FM. -->
+        <nav class="sidebar-menu">
+          <a href="#" class="sidebar-link active" data-page="general"><span class="sidebar-link-icon"><i class="fa-solid fa-house"></i></span><span data-i18n="dashboard.nav.general">Général</span></a>
+          <a href="#" class="sidebar-link" data-page="social"><span class="sidebar-link-icon"><i class="fa-solid fa-hashtag"></i></span><span data-i18n="dashboard.nav.social">Réseaux</span></a>
+          <a href="#" class="sidebar-link" data-page="mail"><span class="sidebar-link-icon"><i class="fa-solid fa-envelope"></i></span><span data-i18n="dashboard.nav.mail">Mail</span></a>
+
+          <div class="nav-group" data-group="club">
+            <button type="button" class="sidebar-link nav-group-trigger">
+              <span class="sidebar-link-icon"><i class="fa-solid fa-shield-halved"></i></span><span data-i18n="dashboard.nav.club">Club</span><i class="fa-solid fa-chevron-down nav-group-caret"></i>
+            </button>
+            <div class="nav-group-menu">
+              <a href="#" class="sidebar-link" data-page="calendar"><span class="sidebar-link-icon"><i class="fa-solid fa-calendar-days"></i></span><span data-i18n="dashboard.nav.calendar">Calendrier</span></a>
+              <a href="#" class="sidebar-link" data-page="infrastructure"><span class="sidebar-link-icon"><i class="fa-solid fa-building"></i></span><span data-i18n="dashboard.nav.infrastructure">Infrastructure</span></a>
+              <a href="#" class="sidebar-link" data-page="slots"><span class="sidebar-link-icon"><i class="fa-solid fa-shop"></i></span><span data-i18n="dashboard.nav.slots">Slots</span></a>
+            </div>
+          </div>
+
+          <div class="nav-group" data-group="finances">
+            <button type="button" class="sidebar-link nav-group-trigger">
+              <span class="sidebar-link-icon"><i class="fa-solid fa-sack-dollar"></i></span><span data-i18n="dashboard.nav.finances">Finances</span><i class="fa-solid fa-chevron-down nav-group-caret"></i>
+            </button>
+            <div class="nav-group-menu">
+              <a href="#" class="sidebar-link" data-page="finances"><span class="sidebar-link-icon"><i class="fa-solid fa-sack-dollar"></i></span><span data-i18n="dashboard.nav.finances">Finances</span></a>
+              <a href="#" class="sidebar-link" data-page="budget"><span class="sidebar-link-icon"><i class="fa-solid fa-scale-balanced"></i></span><span data-i18n="dashboard.nav.budget">Budget</span></a>
+              <a href="#" class="sidebar-link" data-page="sponsors"><span class="sidebar-link-icon"><i class="fa-solid fa-handshake"></i></span><span data-i18n="dashboard.nav.sponsors">Sponsors</span></a>
+              <a href="#" class="sidebar-link" data-page="merch"><span class="sidebar-link-icon"><i class="fa-solid fa-shop"></i></span><span data-i18n="dashboard.nav.merch">Merch</span></a>
+            </div>
+          </div>
+
+          <div class="nav-group" data-group="effectif">
+            <button type="button" class="sidebar-link nav-group-trigger">
+              <span class="sidebar-link-icon"><i class="fa-solid fa-people-group"></i></span><span data-i18n="dashboard.nav.squad">Effectif</span><i class="fa-solid fa-chevron-down nav-group-caret"></i>
+            </button>
+            <div class="nav-group-menu">
+              <a href="#" class="sidebar-link" data-page="squad"><span class="sidebar-link-icon"><i class="fa-solid fa-people-group"></i></span><span data-i18n="dashboard.nav.squad">Effectif</span></a>
+              <a href="#" class="sidebar-link" data-page="staff"><span class="sidebar-link-icon"><i class="fa-solid fa-users-gear"></i></span><span data-i18n="dashboard.nav.staff">Staff</span></a>
+              <a href="#" class="sidebar-link" data-page="delegation"><span class="sidebar-link-icon"><i class="fa-solid fa-diagram-project"></i></span><span data-i18n="dashboard.nav.delegation">Délégation</span></a>
+            </div>
+          </div>
+
+          <a href="#" class="sidebar-link" data-page="transfers"><span class="sidebar-link-icon"><i class="fa-solid fa-right-left"></i></span><span data-i18n="dashboard.nav.transfers">Transferts</span></a>
+        </nav>
+
+        <!-- Simplifié : plus de bouton précédent/suivant ni de libellé caché
+             ("Sections eSport") — avec au plus une poignée de sections
+             possédées, un vrai carrousel n'a jamais d'utilité et ne faisait
+             que créer un grand vide + une flèche fantôme (voir capture
+             signalée) entre "Transferts" et le lien de section. Un simple
+             groupe accolé, séparé par un trait vertical, suffit ; si jamais
+             trop de sections ne tenaient plus sur une largeur d'écran donnée,
+             overflow-x:auto (scroll silencieux, sans flèches) prend le relais. -->
+        <nav class="sidebar-menu sidebar-sections" id="sidebarSections"></nav>
+      </div>
+
+      <div class="topbar-right">
+        <div class="topbar-stat budget-hover-wrap" id="topBudgetStat">
+          <span class="topbar-stat-icon budget"><i class="fa-solid fa-coins"></i></span>
+          <div><div class="topbar-value" id="topBudget">0 €</div><div class="topbar-label" id="topBudgetLabel">Budget</div></div>
+        </div>
+        <div class="topbar-stat" id="topSectionBudgetStat" style="display:none;">
+          <span class="topbar-stat-icon section"><i class="fa-solid fa-sitemap"></i></span>
+          <div><div class="topbar-value" id="topSectionBudget">0 €</div><div class="topbar-label" id="topSectionBudgetLabel">Budget section</div></div>
+        </div>
+        <div class="topbar-music-wrap" id="topbarMusicWrap">
+          <button type="button" class="icon-btn" id="btnMusicToggle" title="Musique" data-i18n-attr-title="dashboard.topbar.music">
+            <i class="fa-solid fa-music"></i>
+          </button>
+          <div class="topbar-music-panel" id="topbarMusicPanel">
+            <div class="topbar-music-now">
+              <i class="fa-solid fa-music topbar-music-icon"></i>
+              <div class="topbar-music-text">
+                <div class="topbar-music-title" id="topbarMusicTitle">—</div>
+              </div>
+            </div>
+            <div class="topbar-music-progress-row">
+              <span class="topbar-music-time" id="topbarMusicTimeCurrent">0:00</span>
+              <input type="range" class="topbar-music-progress" id="topbarMusicProgress" min="0" max="100" step="0.1" value="0" title="Avancement de la piste">
+              <span class="topbar-music-time" id="topbarMusicTimeTotal">0:00</span>
+            </div>
+            <div class="topbar-music-divider"></div>
+            <div class="topbar-music-controls">
+              <button class="icon-btn music-btn" id="btnMusicPrev" title="Piste précédente"><i class="fa-solid fa-backward-step"></i></button>
+              <button class="icon-btn music-btn music-btn-primary" id="btnMusicPlayPause" title="Lecture"><i class="fa-solid fa-play"></i></button>
+              <button class="icon-btn music-btn" id="btnMusicNext" title="Piste suivante"><i class="fa-solid fa-forward-step"></i></button>
+            </div>
+            <div class="topbar-music-divider"></div>
+            <div class="topbar-music-volume-row">
+              <button class="icon-btn music-btn" id="btnMusicMute" title="Couper la musique"><i class="fa-solid fa-volume-high"></i></button>
+              <input type="range" class="topbar-music-volume" id="topbarMusicVolume" min="0" max="100" step="1" value="70" title="Volume de la musique">
+            </div>
+          </div>
+        </div>
+        <div class="topbar-date">
+          <div id="topDate">1 Décembre 2025</div>
+          <div class="topbar-date-time" id="topTime">09:00</div>
+        </div>
+        <button class="cta-advance-btn" id="btnAdvanceDay" title="Avancer d'un jour">Avancer <i class="fa-solid fa-forward-step"></i></button>
+        <button class="icon-btn" id="btnOpenOptions" title="Options" data-i18n-attr-title="options.title"><i class="fa-solid fa-sliders"></i></button>
+      </div>
+    </header>
+
+    <div id="sidebarSectionNav" class="sidebar-section-nav"></div>
+
+    <main class="content" id="pageContent"></main>
+  </div>
+
+  <button type="button" class="scroll-more-hint" id="scrollMoreHint" title="Plus de contenu en dessous" data-i18n-attr-title="common.scrollForMore"><i class="fa-solid fa-chevron-down"></i></button>
+
+  <div class="notif-panel" id="notifPanel">
+    <div class="notif-panel-header">Notifications <button id="closeNotif"><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="notif-panel-body" id="notifList"></div>
+  </div>
+</section>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- ================= VST T2 SLOT BUY MODAL ================= -->
+<div class="vct-slot-modal" id="vctSlotModal">
+  <div class="vct-slot-modal-inner" role="dialog" aria-modal="true" aria-labelledby="vctSlotModalTitle">
+    <div class="vct-slot-modal-header">
+      <div class="vct-slot-modal-title" id="vctSlotModalTitle"><i class="fa-solid fa-shield-halved"></i> <span data-i18n="modal.vctSlot.title">Rachat d'un slot Challenger</span></div>
+      <p id="vctSlotModalDesc">Il n'existe pas de place vacante dans le circuit VST : pour inscrire votre section Valostrike en Tier 2, vous devez racheter la place d'une équipe existante dans l'une des ligues Challengers ci-dessous. L'équipe choisie quitte le circuit et votre organisation prend son slot.</p>
+    </div>
+    <div class="vct-slot-leagues" id="vctSlotLeagues"></div>
+    <div class="vct-slot-modal-footer">
+      <button class="btn" id="vctSlotCancelBtn" data-i18n="common.cancel">Annuler</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= LOL ERL LEAGUE PICKER ================= -->
+<div class="vct-slot-modal" id="lolLeagueModal">
+  <div class="vct-slot-modal-inner" role="dialog" aria-modal="true" aria-labelledby="lolLeagueModalTitle">
+    <div class="vct-slot-modal-header">
+      <div class="vct-slot-modal-title" id="lolLeagueModalTitle"><i class="fa-solid fa-earth-europe"></i> <span data-i18n="modal.lolLeague.title">Choix de votre ligue ERL</span></div>
+      <p>Le circuit européen de League of Legends est fragmenté en ligues nationales (ERL). Choisissez la ligue régionale dans laquelle votre structure fera ses débuts.</p>
+    </div>
+    <div class="vct-slot-leagues" id="lolLeagueOptions"></div>
+    <div class="vct-slot-modal-footer">
+      <button class="btn" id="lolLeagueCancelBtn" data-i18n="common.cancel">Annuler</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= RLCS RÉGION PICKER ================= -->
+<div class="vct-slot-modal" id="rlRegionModal">
+  <div class="vct-slot-modal-inner" role="dialog" aria-modal="true" aria-labelledby="rlRegionModalTitle">
+    <div class="vct-slot-modal-header">
+      <div class="vct-slot-modal-title" id="rlRegionModalTitle"><i class="fa-solid fa-earth-americas"></i> <span data-i18n="modal.rlRegion.title">Choix de votre région RLCS</span></div>
+      <p>Le circuit Rocket Champ est découpé en 4 régions. Choisissez celle dans laquelle votre structure disputera ses Opens, sa LCQ et affrontera ses adversaires directs.</p>
+    </div>
+    <div class="vct-slot-leagues" id="rlRegionOptions"></div>
+    <div class="vct-slot-modal-footer">
+      <button class="btn" id="rlRegionCancelBtn" data-i18n="common.cancel">Annuler</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= VALOSTRIKE GC RÉGION PICKER ================= -->
+<div class="vct-slot-modal" id="gcRegionModal">
+  <div class="vct-slot-modal-inner" role="dialog" aria-modal="true" aria-labelledby="gcRegionModalTitle">
+    <div class="vct-slot-modal-header">
+      <div class="vct-slot-modal-title" id="gcRegionModalTitle"><i class="fa-solid fa-earth-americas"></i> <span data-i18n="modal.gcRegion.title">Choix de votre région Game Changers</span></div>
+      <p>Le circuit VST Game Changers est découpé en 4 régions, chacune avec ses organisations déjà affiliées. Choisissez celle dans laquelle votre structure évoluera, le Kickoff se chargera de compléter le plateau jusqu'à 10 équipes.</p>
+    </div>
+    <div class="vct-slot-leagues" id="gcRegionOptions"></div>
+    <div class="vct-slot-modal-footer">
+      <button class="btn" id="gcRegionCancelBtn" data-i18n="common.cancel">Annuler</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= NOTES DE MISE À JOUR (vue agrandie) ================= -->
+<div class="modal-overlay" id="patchNotesModalOverlay" style="display:none;">
+  <div class="modal-panel" role="dialog" aria-modal="true" style="max-width:760px;">
+    <button class="profile-modal-close" id="patchNotesModalClose" style="top:16px;right:16px;"><i class="fa-solid fa-xmark"></i></button>
+    <h4 style="margin-bottom:4px;display:flex;align-items:center;gap:8px;padding-right:34px;">
+      <i class="fa-solid fa-code-branch"></i> <span data-i18n="menu.patchnotes.title">Notes de mise à jour</span>
+      <span class="patchnotes-modal-nav" style="margin-left:auto;">
+        <button type="button" class="patchnotes-nav-btn" id="patchNotesModalOlder" title="Version précédente"><i class="fa-solid fa-chevron-left"></i></button>
+        <span class="mainmenu-patchnotes-version" id="patchNotesModalVersion"></span>
+        <button type="button" class="patchnotes-nav-btn" id="patchNotesModalNewer" title="Version suivante"><i class="fa-solid fa-chevron-right"></i></button>
+      </span>
+    </h4>
+    <ul class="mainmenu-patchnotes-list mainmenu-patchnotes-list-full" id="patchNotesModalList" style="margin-top:16px;"></ul>
+  </div>
+</div>
+
+<!-- ================= FORGE D'IDENTITÉ (création/édition du blason du club) ================= -->
+<div class="modal-overlay" id="identityForgeModalOverlay" style="display:none;">
+  <div class="modal-panel forge-panel" role="dialog" aria-modal="true">
+    <button class="profile-modal-close" id="identityForgeClose"><i class="fa-solid fa-xmark"></i></button>
+    <div id="identityForgeBody"></div>
+  </div>
+</div>
+
+<!-- ================= CONFIRMATION D'ACTION (licenciement joueur/staff, etc.) ================= -->
+<div class="modal-overlay" id="confirmActionModalOverlay" style="display:none;">
+  <div class="modal-panel" role="dialog" aria-modal="true" style="max-width:440px;">
+    <h4 id="confirmActionTitle" style="margin-bottom:4px;"><i class="fa-solid fa-triangle-exclamation"></i> <span id="confirmActionTitleText"></span></h4>
+    <p id="confirmActionBody" style="color:var(--text-secondary);font-size:13.5px;margin:10px 0 20px;"></p>
+    <div style="display:flex;gap:10px;">
+      <button class="btn" id="confirmActionCancelBtn" style="flex:1;justify-content:center;" data-i18n="common.cancel">Annuler</button>
+      <button class="btn btn-danger" id="confirmActionConfirmBtn" style="flex:1;justify-content:center;"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= FICHE JOUEUR / STAFF MODAL ================= -->
+<div class="profile-modal-overlay" id="profileModalOverlay">
+  <div class="profile-modal" role="dialog" aria-modal="true">
+    <button class="profile-modal-close" id="profileModalClose"><i class="fa-solid fa-xmark"></i></button>
+    <div class="profile-modal-body" id="profileModalBody"></div>
+  </div>
+</div>
+
+<!-- ================= NÉGOCIATION MERCATO ================= -->
+<div class="vct-slot-modal" id="negoModal">
+  <div class="vct-slot-modal-inner nego-pro" style="max-width:1080px;" role="dialog" aria-modal="true" aria-labelledby="negoModalTitle">
+    <div class="vct-slot-modal-header">
+      <div class="vct-slot-modal-title" id="negoModalTitle"><i class="fa-solid fa-handshake"></i> <span data-i18n="modal.nego.title">Négociation</span></div>
+      <p id="negoPlayerLabel"></p>
+    </div>
+    <div class="nego-pro-grid">
+      <div class="nego-pro-side">
+        <div class="card info-card" id="negoPlayerCard"></div>
+        <div class="card info-card" id="negoBudgetsCard" style="margin-top:14px;"></div>
+      </div>
+      <div class="nego-pro-main">
+        <div class="options-panel" style="padding:0;border:none;box-shadow:none;background:transparent;">
+          <div class="profile-section-title" style="margin-top:0;">Infos de base</div>
+          <div id="negoFeeSliderWrap" class="opt-row">
+            <div><div class="opt-row-label" id="negoFeeLabel">Montant du contrat</div><div class="opt-row-desc" id="negoFeeHint"></div></div>
+            <div class="opt-row-control"><input type="range" class="opt-slider" id="negoFee" min="0" max="200" value="100"><span class="opt-slider-value" id="negoFeeValue"></span></div>
+          </div>
+          <div id="negoInstallmentsWrap" class="opt-row">
+            <div><div class="opt-row-label">Versements</div><div class="opt-row-desc">Étale l'indemnité de transfert sur plusieurs échéances au lieu d'un paiement comptant.</div></div>
+            <div class="opt-row-control" id="negoInstallments"></div>
+          </div>
+          <div class="opt-row">
+            <div><div class="opt-row-label">Statut promis dans l'effectif</div><div class="opt-row-desc" id="negoHierarchyHint">Le rôle que vous vous engagez à lui donner dans la hiérarchie de l'équipe.</div></div>
+            <div class="opt-row-control" id="negoHierarchy" style="flex-wrap:wrap;max-width:280px;justify-content:flex-end;"></div>
+          </div>
+          <div id="negoAcademyWrap" class="opt-row" style="display:none;">
+            <div><div class="opt-row-label">Contrat Académie</div><div class="opt-row-desc" id="negoAcademyHint">Rejoint le centre de formation plutôt que l'effectif principal, développement à long terme, salaire réduit.</div></div>
+            <div class="opt-row-control"><label class="opt-toggle"><input type="checkbox" id="negoAcademyToggle"><span class="opt-toggle-track"></span></label></div>
+          </div>
+          <div class="opt-row">
+            <div class="opt-row-label">Durée du contrat</div>
+            <div class="opt-row-control" id="negoDuration"></div>
+          </div>
+
+          <div class="profile-section-title">Primes additionnelles</div>
+          <div class="opt-row">
+            <div><div class="opt-row-label">Salaire proposé</div><div class="opt-row-desc" id="negoSalaryHint"></div></div>
+            <div class="opt-row-control">
+              <div class="stepper-control">
+                <button type="button" class="stepper-btn" id="negoSalaryMinusBtn"><i class="fa-solid fa-minus"></i></button>
+                <div class="stepper-value-box">
+                  <input type="number" class="stepper-value-input" id="negoSalaryValue" min="0" step="50">
+                  <span class="stepper-value-suffix">€/mois</span>
+                </div>
+                <button type="button" class="stepper-btn" id="negoSalaryPlusBtn"><i class="fa-solid fa-plus"></i></button>
+              </div>
+            </div>
+          </div>
+          <div class="opt-row">
+            <div><div class="opt-row-label">Prime après apparitions</div><div class="opt-row-desc" id="negoAppearanceHint">Prime versée dès que le joueur atteint un nombre de matchs officiels.</div></div>
+            <div class="opt-row-control"><label class="opt-toggle"><input type="checkbox" id="negoAppearanceToggle"><span class="opt-toggle-track"></span></label></div>
+          </div>
+          <div id="negoAppearanceFields" style="display:none;">
+            <div class="opt-row">
+              <div class="opt-row-label">Seuil de matchs</div>
+              <div class="opt-row-control"><input type="range" class="opt-slider" id="negoAppearanceThreshold" min="5" max="40" step="5" value="15"><span class="opt-slider-value" id="negoAppearanceThresholdValue"></span></div>
+            </div>
+            <div class="opt-row">
+              <div class="opt-row-label">Montant de la prime</div>
+              <div class="opt-row-control"><input type="range" class="opt-slider" id="negoAppearanceAmount" min="0" max="200" step="5" value="50"><span class="opt-slider-value" id="negoAppearanceAmountValue"></span></div>
+            </div>
+          </div>
+          <div class="opt-row">
+            <div><div class="opt-row-label">Clause de bonus</div><div class="opt-row-desc">Bonus de performance si le club est sacré Champion</div></div>
+            <div class="opt-row-control"><label class="opt-toggle"><input type="checkbox" id="negoBonus"><span class="opt-toggle-track"></span></label></div>
+          </div>
+
+
+        </div>
+      </div>
+      <div class="nego-pro-feed">
+        <div class="nego-pro-feed-header">
+          <div class="nego-pro-feed-avatar"><i class="fa-solid fa-user-tie"></i></div>
+          <div>
+            <div class="nego-pro-feed-name">Agent du joueur</div>
+            <div class="nego-pro-feed-role">Suivi de la négociation</div>
+          </div>
+        </div>
+        <div class="nego-pro-feed-body" id="negoLiveFeedback"></div>
+      </div>
+    </div>
+    <div class="vct-slot-modal-footer" style="justify-content:space-between;">
+      <button class="btn" id="negoCancelBtn" data-i18n="common.cancel">Annuler</button>
+      <button class="btn btn-danger" id="negoReleaseBtn" style="display:none;"><i class="fa-solid fa-door-open"></i> Laisser partir</button>
+      <button class="btn btn-primary" id="negoSendBtn"><i class="fa-solid fa-paper-plane"></i> Proposer les termes</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<!-- Dictionnaire de traduction statique (chrome d'interface uniquement — pas
+     le contenu de simulation généré dynamiquement) + applyI18n(), voir
+     l'en-tête du fichier pour la convention data-i18n. Chargé AVANT
+     script.js : ce dernier appelle applyI18n() (déclaration de fonction,
+     donc disponible globalement dès le parsing) au chargement initial et
+     depuis le sélecteur de langue des Options. -->
+<script src="trad_anglais.js?v=24"></script>
+<script src="script.js?v=250"></script>
+<!-- Code strictement exclusif à Valorant (cellule de staff dédiée, marché
+     de recrutement associé, notes de patch, classement Ranked Solo Queue) —
+     voir l'en-tête de valorant.js pour le détail de ce qui est séparé et
+     pourquoi certains autres systèmes "Valorant" restent dans script.js. -->
+<script src="valorant.js?v=165"></script>
+<!-- Code strictement exclusif à Valostrike GC (Game Changers) : cellule de
+     staff dédiée, vivier de joueuses indépendant, marché de recrutement
+     associé — réutilise en revanche tel quel le pool de maps, le pool
+     d'agents et le système de patch de valorant.js (voir son en-tête). -->
+<script src="valorant-gc.js?v=163"></script>
+<!-- Code strictement exclusif à Rocket League (cellule de staff dédiée et
+     marché de recrutement associé), sur le même modèle que valorant.js. -->
+<script src="rocketleague.js?v=162"></script>
+</body>
+</html>

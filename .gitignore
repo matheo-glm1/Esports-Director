@@ -1,0 +1,12 @@
+# Outils de dev portables (Python embarqué, esbuild) — des binaires, pas
+# du contenu de jeu : inutile et lourd à versionner, chacun peut les
+# retélécharger si besoin.
+runtime/
+devtools/
+
+# Config locale de l'outil Claude Code
+.claude/
+
+# Fichiers système
+Thumbs.db
+.DS_Store
