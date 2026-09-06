@@ -73,7 +73,14 @@
         <input type="text" id="orgTag" class="field-input field-tag" placeholder="PHX" maxlength="3">
 
         <label class="field-label">Pays de la structure</label>
-        <select id="orgCountry" class="field-input"></select>
+        <div class="country-picker" id="orgCountryPicker">
+          <button type="button" class="field-input country-picker-trigger" id="orgCountryTrigger">
+            <img class="country-flag-icon" id="orgCountryTriggerFlag" alt="">
+            <span id="orgCountryTriggerLabel"></span>
+            <i class="fa-solid fa-chevron-down country-picker-chevron"></i>
+          </button>
+          <div class="country-picker-list" id="orgCountryList" hidden></div>
+        </div>
 
         <label class="field-label" data-i18n="newgame.field.colors">Couleur</label>
         <div class="color-picker-panel">

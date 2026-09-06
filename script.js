@@ -1154,32 +1154,40 @@ function isBettingSponsor(name){ return SPONSOR_BETTING_POOL.includes(name); }
 // publicitaire des jeux d'argent dans chaque pays : 'libre' (peu ou pas de
 // restriction), 'restreint' (encadrement fort, zone grise), 'interdit'
 // (publicité/sponsoring de paris essentiellement prohibé).
+// `flagIso` : code ISO 3166-1 alpha-2 EN MINUSCULES utilisé pour charger le
+// petit drapeau (voir countryFlagUrl/flagcdn.com plus bas) — jamais les
+// emoji drapeau essayés en premier : ils ne s'affichent pas du tout sur
+// beaucoup de configurations Windows (police système sans les glyphes de
+// drapeaux), juste le code pays en lettres ("FR" au lieu de 🇫🇷, signalé
+// explicitement). `key` sert de code partout ailleurs dans le jeu (state.
+// org.country, SPONSOR_COUNTRIES lui-même) et diffère de l'ISO réel
+// uniquement pour le Royaume-Uni ('uk' ici, vrai code ISO 'gb').
 const SPONSOR_COUNTRIES = [
-  { key:'fr', label:'France',                 gamblingAd:'restreint' },
-  { key:'be', label:'Belgique',                gamblingAd:'restreint' },
-  { key:'it', label:'Italie',                  gamblingAd:'interdit' },
-  { key:'es', label:'Espagne',                 gamblingAd:'restreint' },
-  { key:'uk', label:'Royaume-Uni',             gamblingAd:'libre' },
-  { key:'de', label:'Allemagne',               gamblingAd:'restreint' },
-  { key:'nl', label:'Pays-Bas',                gamblingAd:'restreint' },
-  { key:'pt', label:'Portugal',                gamblingAd:'restreint' },
-  { key:'se', label:'Suède',                   gamblingAd:'restreint' },
-  { key:'dk', label:'Danemark',                gamblingAd:'libre' },
-  { key:'no', label:'Norvège',                 gamblingAd:'interdit' },
-  { key:'pl', label:'Pologne',                 gamblingAd:'restreint' },
-  { key:'tr', label:'Turquie',                 gamblingAd:'interdit' },
-  { key:'us', label:'États-Unis',              gamblingAd:'libre' },
-  { key:'ca', label:'Canada',                  gamblingAd:'libre' },
-  { key:'br', label:'Brésil',                  gamblingAd:'libre' },
-  { key:'mx', label:'Mexique',                 gamblingAd:'libre' },
-  { key:'ar', label:'Argentine',               gamblingAd:'libre' },
-  { key:'kr', label:'Corée du Sud',            gamblingAd:'interdit' },
-  { key:'jp', label:'Japon',                   gamblingAd:'interdit' },
-  { key:'cn', label:'Chine',                   gamblingAd:'interdit' },
-  { key:'sa', label:'Arabie Saoudite',         gamblingAd:'interdit' },
-  { key:'ae', label:'Émirats Arabes Unis',     gamblingAd:'interdit' },
-  { key:'in', label:'Inde',                    gamblingAd:'restreint' },
-  { key:'au', label:'Australie',               gamblingAd:'restreint' },
+  { key:'fr', label:'France',                 flagIso:'fr', gamblingAd:'restreint' },
+  { key:'be', label:'Belgique',                flagIso:'be', gamblingAd:'restreint' },
+  { key:'it', label:'Italie',                  flagIso:'it', gamblingAd:'interdit' },
+  { key:'es', label:'Espagne',                 flagIso:'es', gamblingAd:'restreint' },
+  { key:'uk', label:'Royaume-Uni',             flagIso:'gb', gamblingAd:'libre' },
+  { key:'de', label:'Allemagne',               flagIso:'de', gamblingAd:'restreint' },
+  { key:'nl', label:'Pays-Bas',                flagIso:'nl', gamblingAd:'restreint' },
+  { key:'pt', label:'Portugal',                flagIso:'pt', gamblingAd:'restreint' },
+  { key:'se', label:'Suède',                   flagIso:'se', gamblingAd:'restreint' },
+  { key:'dk', label:'Danemark',                flagIso:'dk', gamblingAd:'libre' },
+  { key:'no', label:'Norvège',                 flagIso:'no', gamblingAd:'interdit' },
+  { key:'pl', label:'Pologne',                 flagIso:'pl', gamblingAd:'restreint' },
+  { key:'tr', label:'Turquie',                 flagIso:'tr', gamblingAd:'interdit' },
+  { key:'us', label:'États-Unis',              flagIso:'us', gamblingAd:'libre' },
+  { key:'ca', label:'Canada',                  flagIso:'ca', gamblingAd:'libre' },
+  { key:'br', label:'Brésil',                  flagIso:'br', gamblingAd:'libre' },
+  { key:'mx', label:'Mexique',                 flagIso:'mx', gamblingAd:'libre' },
+  { key:'ar', label:'Argentine',               flagIso:'ar', gamblingAd:'libre' },
+  { key:'kr', label:'Corée du Sud',            flagIso:'kr', gamblingAd:'interdit' },
+  { key:'jp', label:'Japon',                   flagIso:'jp', gamblingAd:'interdit' },
+  { key:'cn', label:'Chine',                   flagIso:'cn', gamblingAd:'interdit' },
+  { key:'sa', label:'Arabie Saoudite',         flagIso:'sa', gamblingAd:'interdit' },
+  { key:'ae', label:'Émirats Arabes Unis',     flagIso:'ae', gamblingAd:'interdit' },
+  { key:'in', label:'Inde',                    flagIso:'in', gamblingAd:'restreint' },
+  { key:'au', label:'Australie',               flagIso:'au', gamblingAd:'restreint' },
 ];
 function sponsorCountry(){
   return SPONSOR_COUNTRIES.find(c=>c.key===(state.org && state.org.country)) || SPONSOR_COUNTRIES[0];
@@ -11767,7 +11775,18 @@ function removeImageBackground(dataUrl, tolerance=34){
         const data = imageData.data;
         const px = (x,y)=> (y*w+x)*4;
 
-        const corners = [px(0,0), px(w-1,0), px(0,h-1), px(w-1,h-1)];
+        // Léger retrait (quelques px, jamais plus de 4) par rapport au bord
+        // LITTÉRAL pour échantillonner ET amorcer la propagation — certains
+        // exports (constaté sur des logos générés en carte arrondie) ont un
+        // très fin liseré d'ombre/contour 1-2px plus sombre que le vrai fond
+        // juste à côté ; échantillonner/partir EXACTEMENT du pixel (0,0)
+        // tombe alors sur ce liseré au lieu du vrai fond, et toute la
+        // propagation échoue dès le premier pixel (le fond reste presque
+        // entièrement opaque). Inoffensif sur un fond uni classique (même
+        // couleur pile au bord et juste à côté) : ce retrait ne change rien
+        // dans ce cas, la propagation peut toujours atteindre le bord réel.
+        const inset = Math.max(1, Math.min(4, Math.floor(Math.min(w,h)*0.01)));
+        const corners = [px(inset,inset), px(w-1-inset,inset), px(inset,h-1-inset), px(w-1-inset,h-1-inset)];
         // Certains fichiers (WEBP/PNG déjà détourés à la source) ont un fond
         // NATIVEMENT transparent plutôt qu'une couleur unie — leur appliquer
         // ce détourage par tolérance RGB serait faux : un pixel transparent
@@ -11785,8 +11804,8 @@ function removeImageBackground(dataUrl, tolerance=34){
 
         const visited = new Uint8Array(w*h);
         const stack = [];
-        for(let x=0;x<w;x++){ stack.push(x,0); stack.push(x,h-1); }
-        for(let y=0;y<h;y++){ stack.push(0,y); stack.push(w-1,y); }
+        for(let x=inset;x<w-inset;x++){ stack.push(x,inset); stack.push(x,h-1-inset); }
+        for(let y=inset;y<h-inset;y++){ stack.push(inset,y); stack.push(w-1-inset,y); }
         while(stack.length){
           const y = stack.pop(), x = stack.pop();
           if(x<0||y<0||x>=w||y>=h) continue;
@@ -12028,6 +12047,118 @@ function preloadTeamLogos(){
       .then(url=>{ teamLogoCache[teamName] = url; })
       .catch(()=>{});
   });
+}
+
+// Vrais logos de sponsors (Logo/marques/<fichier>) — réutilise
+// removeImageBackground (détourage générique par tolérance depuis les
+// bords, voir plus haut) MAIS PAS normalizeLogoSquare : ces logos "marque"
+// sont des compositions LARGES (symbole + nom en dessous, ex. 1536×1024),
+// jamais carrées comme les blasons d'équipe — les forcer dans un canevas
+// carré rembourré les rendrait minuscules une fois affichés en petit
+// pictogramme inline devant un nom de sponsor. cropToContentBounds recadre
+// juste sur le contenu réel (garde le format d'origine) sans les
+// re-remplir dans un carré.
+function cropToContentBounds(dataUrl){
+  return new Promise((resolve, reject)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const w = img.naturalWidth, h = img.naturalHeight;
+        const srcCanvas = document.createElement('canvas');
+        srcCanvas.width = w; srcCanvas.height = h;
+        const sctx = srcCanvas.getContext('2d', { willReadFrequently:true });
+        sctx.drawImage(img, 0, 0);
+        let minX=w, minY=h, maxX=0, maxY=0, hasContent=false;
+        const data = sctx.getImageData(0,0,w,h).data;
+        for(let y=0;y<h;y++){
+          for(let x=0;x<w;x++){
+            if(data[(y*w+x)*4+3] > 10){
+              hasContent = true;
+              if(x<minX) minX=x; if(x>maxX) maxX=x;
+              if(y<minY) minY=y; if(y>maxY) maxY=y;
+            }
+          }
+        }
+        if(!hasContent){ resolve(dataUrl); return; }
+        const cw = maxX-minX+1, ch = maxY-minY+1;
+        const out = document.createElement('canvas');
+        out.width = cw; out.height = ch;
+        out.getContext('2d').drawImage(srcCanvas, minX, minY, cw, ch, 0, 0, cw, ch);
+        resolve(out.toDataURL('image/png'));
+      }catch(e){
+        // Canevas souillé (voir removeImageBackground) : image brute plutôt
+        // que perdue.
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = ()=> reject(new Error('Image illisible'));
+    img.src = dataUrl;
+  });
+}
+async function loadSponsorLogo(path){
+  const isSvg = /\.svg(\?|$)/i.test(path);
+  const raw = isSvg ? path : await removeImageBackground(path);
+  return cropToContentBounds(raw);
+}
+// AUCUNE liste à tenir à jour à la main : contrairement aux logos d'équipe
+// (TEAM_LOGO_FILES, un vrai roster connu à l'avance), le pool de sponsors
+// est fictif et énorme (192 noms, voir SPONSOR_POOL) et le contenu de
+// Logo/marques/ change au gré des PNG que le joueur y dépose. Un vrai scan
+// de dossier est impossible en file:// (aucune API de listing de fichiers
+// côté navigateur — même limite que loadTeamLogo). Seule option restante :
+// ESSAYER plusieurs variantes plausibles du nom de fichier et ne garder que
+// celle qui charge vraiment (un échec est un résultat normal — fichier
+// simplement absent — jamais une erreur remontée). Windows (seule
+// plateforme visée par ce jeu, voir feedback file://) résout les noms de
+// fichier SANS tenir compte de la casse, donc pas besoin de variantes
+// minuscules/majuscules séparées, juste espaces/underscore/collés.
+function sponsorLogoCandidatePaths(name){
+  const bases = [...new Set([name, name.replace(/\s+/g,'_'), name.replace(/\s+/g,'')])];
+  const exts = ['png','webp','jpg','jpeg'];
+  const paths = [];
+  bases.forEach(base=> exts.forEach(ext=> paths.push(`Logo/marques/${base}.${ext}`)));
+  return paths;
+}
+const sponsorLogoCache = {};
+// Sponsors pour lesquels AUCUNE variante n'a chargé — mémorisé pour ne
+// jamais retenter à chaque re-rendu de la même fiche/carte (sinon un
+// sponsor sans logo relancerait le même essai de 12 fichiers absents à
+// chaque frappe/re-rendu).
+const sponsorLogoMissing = {};
+const sponsorLogoLoading = {};
+// Essaie chaque variante dans l'ordre, s'arrête à la première qui charge
+// vraiment (loadSponsorLogo rejette proprement sur un fichier absent, voir
+// removeImageBackground) — jamais d'erreur remontée au joueur.
+async function findAndLoadSponsorLogo(name){
+  for(const path of sponsorLogoCandidatePaths(name)){
+    try{ return await loadSponsorLogo(encodeURI(path)); }
+    catch(e){ /* ce fichier n'existe pas, variante suivante */ }
+  }
+  return null;
+}
+// Icône à afficher devant un nom de sponsor : le vrai logo détouré s'il est
+// disponible/en cache, sinon l'icône FontAwesome de repli demandée par
+// l'appelant — se patche tout seul dès que la recherche automatique
+// termine (même principe que teamProfileAvatarHtml, sans avoir besoin d'y
+// attendre). Hauteur fixe (pas largeur fixe) + largeur libre mais
+// plafonnée : ces logos étant larges (symbole+texte), contraindre la
+// HAUTEUR à la ligne de texte tout en laissant la largeur s'adapter donne
+// un rendu net, plutôt qu'un carré qui les écraserait à une taille
+// illisible.
+function sponsorLogoIconHtml(name, fallbackIconClass){
+  const cached = sponsorLogoCache[name];
+  if(cached) return `<img src="${cached}" alt="" style="height:1.3em;width:auto;max-width:3.2em;object-fit:contain;vertical-align:-0.3em;margin-right:3px;">`;
+  if(!sponsorLogoMissing[name] && !sponsorLogoLoading[name]){
+    sponsorLogoLoading[name] = true;
+    findAndLoadSponsorLogo(name).then(url=>{
+      if(!url){ sponsorLogoMissing[name] = true; return; }
+      sponsorLogoCache[name] = url;
+      document.querySelectorAll(`[data-sponsor-logo-pending="${escapeAttr(name)}"]`).forEach(el=>{
+        el.outerHTML = `<img src="${url}" alt="" style="height:1.3em;width:auto;max-width:3.2em;object-fit:contain;vertical-align:-0.3em;margin-right:3px;">`;
+      });
+    }).catch(()=>{ sponsorLogoMissing[name] = true; }).finally(()=>{ delete sponsorLogoLoading[name]; });
+  }
+  return `<i class="fa-solid ${fallbackIconClass}" data-sponsor-logo-pending="${escapeAttr(name)}"></i>`;
 }
 // Avatar d'une fiche équipe : vrai logo détouré si disponible, sinon
 // l'icône générique habituelle (comportement inchangé) — jamais d'attente
@@ -12391,6 +12522,58 @@ function applyGameThemeToNewGameScreen(game){
     screen.style.removeProperty('--ng-theme-strong');
   }
 }
+// Petit drapeau (24x18, PNG) via flagcdn.com — pas de clé requise, léger.
+// Comme les polices Google/FontAwesome déjà chargées en CDN par ce jeu
+// (voir index.html), ça a besoin d'Internet pour s'afficher ; sans
+// connexion, onerror masque juste l'image plutôt que de laisser une icône
+// "image cassée" — le nom du pays reste lisible à côté dans tous les cas.
+function countryFlagUrl(c){ return `https://flagcdn.com/24x18/${c.flagIso}.png`; }
+// Écouteur de fermeture au clic extérieur posé UNE SEULE FOIS (jamais dans
+// initOrgCountryPicker, qui elle tourne à chaque fois que l'écran de
+// création est (re)visité — un addEventListener à chaque visite
+// empilerait un nouvel écouteur identique à chaque fois).
+let orgCountryPickerBound = false;
+function initOrgCountryPicker(){
+  const trigger = document.getElementById('orgCountryTrigger');
+  const triggerFlag = document.getElementById('orgCountryTriggerFlag');
+  const triggerLabel = document.getElementById('orgCountryTriggerLabel');
+  const list = document.getElementById('orgCountryList');
+  const renderList = ()=>{
+    list.innerHTML = SPONSOR_COUNTRIES.map(c=>`
+      <div class="country-picker-row ${c.key===ngChoice.country?'selected':''}" data-country="${c.key}">
+        <img class="country-flag-icon" src="${countryFlagUrl(c)}" alt="" onerror="this.style.visibility='hidden'">
+        <span>${escapeHtml(c.label)}</span>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-country]').forEach(row=>{
+      row.onclick = ()=>{
+        ngChoice.country = row.dataset.country;
+        updateTrigger();
+        list.hidden = true;
+      };
+    });
+  };
+  const updateTrigger = ()=>{
+    const c = SPONSOR_COUNTRIES.find(x=>x.key===ngChoice.country) || SPONSOR_COUNTRIES[0];
+    triggerFlag.style.visibility = 'visible';
+    triggerFlag.src = countryFlagUrl(c);
+    triggerFlag.onerror = ()=>{ triggerFlag.style.visibility = 'hidden'; };
+    triggerLabel.textContent = c.label;
+  };
+  trigger.onclick = (e)=>{
+    e.stopPropagation();
+    list.hidden = !list.hidden;
+    if(!list.hidden) renderList();
+  };
+  updateTrigger();
+  if(!orgCountryPickerBound){
+    orgCountryPickerBound = true;
+    document.addEventListener('click', (e)=>{
+      const l = document.getElementById('orgCountryList');
+      if(l && !l.hidden && !e.target.closest('#orgCountryPicker')) l.hidden = true;
+    });
+  }
+}
 function initNewGameScreen(){
   ngChoice = { color:COLOR_SWATCHES[0], game:null, vctDivision:null, vctTeam:null, vctCost:0, lolLeague:null, gcRegion:null, country:'fr', difficulty:'streamer', logo:null,
     customLevel: { budget:300000, rep:20, supporters:5000, sponsor:false } };
@@ -12401,10 +12584,11 @@ function initNewGameScreen(){
   // Pays de la structure — sert uniquement au risque des sponsors de paris
   // sportifs selon la réglementation locale (voir SPONSOR_COUNTRIES /
   // applyBettingSponsorConsequence), aucun autre effet sur la partie.
-  const orgCountrySelect = document.getElementById('orgCountry');
-  orgCountrySelect.innerHTML = SPONSOR_COUNTRIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('');
-  orgCountrySelect.value = ngChoice.country;
-  orgCountrySelect.onchange = ()=>{ ngChoice.country = orgCountrySelect.value; };
+  // Menu déroulant MAISON plutôt qu'un <select> natif : un <option> ne peut
+  // afficher que du texte brut dans tous les navigateurs (impossible d'y
+  // glisser une image de drapeau), voir countryFlagUrl pour la source des
+  // drapeaux.
+  initOrgCountryPicker();
 
   renderDifficultyGrid();
 
@@ -17819,7 +18003,7 @@ function renderSponsorsTab(){
     const objs = contract.objectives || [];
     return `
       <div class="card info-card">
-        <h4><i class="fa-solid fa-handshake"></i> ${contract.name}</h4>
+        <h4>${sponsorLogoIconHtml(contract.name, 'fa-handshake')} ${contract.name}</h4>
         <div class="info-row"><span>Revenus mensuels</span><span><b>${formatMoney(contract.monthlyRevenue)}</b></span></div>
         <div class="info-row"><span>Échéance</span><span><b>${contract.endD} ${MONTH_NAMES[contract.endM]} ${contract.endY}</b> (${daysLeft} j)</span></div>
         <div class="profile-role-item-label" style="margin-top:10px;">Objectifs (tous doivent être atteints)</div>
@@ -17849,7 +18033,7 @@ function renderSponsorsTab(){
     <div class="card-grid two">
       ${offers.map(o=>`
         <div class="card info-card">
-          <h4><i class="fa-solid fa-envelope-open-text"></i> ${o.name} ${o.difficultyLabel ? `<span class="badge ${difficultyBadgeCls[o.difficultyKey]||'badge-grey'}" style="margin-left:6px;font-size:10.5px;">${o.difficultyLabel}</span>` : ''}${sponsorOfferBadgesHtml(o)}</h4>
+          <h4>${sponsorLogoIconHtml(o.name, 'fa-envelope-open-text')} ${o.name} ${o.difficultyLabel ? `<span class="badge ${difficultyBadgeCls[o.difficultyKey]||'badge-grey'}" style="margin-left:6px;font-size:10.5px;">${o.difficultyLabel}</span>` : ''}${sponsorOfferBadgesHtml(o)}</h4>
           <div class="info-row"><span>Prime de signature</span><span><b>${formatMoney(o.signingBonus)}</b></span></div>
           <div class="info-row"><span>Revenus mensuels</span><span><b>${formatMoney(o.monthlyRevenue)}</b></span></div>
           <div class="info-row"><span>Durée</span><span><b>${o.durationMonths} mois</b></span></div>
@@ -17874,7 +18058,7 @@ function renderSponsorsTab(){
         const objs = c.objectives || [];
         return `
           <div class="card info-card">
-            <h4><i class="fa-solid fa-handshake-simple"></i> ${c.name}</h4>
+            <h4>${sponsorLogoIconHtml(c.name, 'fa-handshake-simple')} ${c.name}</h4>
             <div class="info-row"><span>Revenus mensuels</span><span><b>${formatMoney(c.monthlyRevenue)}</b></span></div>
             <div class="info-row"><span>Échéance</span><span><b>${c.endD} ${MONTH_NAMES[c.endM]} ${c.endY}</b> (${daysLeft} j)</span></div>
             ${objs.map(o=>{
@@ -17893,7 +18077,7 @@ function renderSponsorsTab(){
     <div class="card-grid two">
       ${secondaryOffers.map(o=>`
         <div class="card info-card">
-          <h4><i class="fa-solid fa-envelope-open-text"></i> ${o.name} ${o.difficultyLabel ? `<span class="badge ${difficultyBadgeCls[o.difficultyKey]||'badge-grey'}" style="margin-left:6px;font-size:10.5px;">${o.difficultyLabel}</span>` : ''}${sponsorOfferBadgesHtml(o)}</h4>
+          <h4>${sponsorLogoIconHtml(o.name, 'fa-envelope-open-text')} ${o.name} ${o.difficultyLabel ? `<span class="badge ${difficultyBadgeCls[o.difficultyKey]||'badge-grey'}" style="margin-left:6px;font-size:10.5px;">${o.difficultyLabel}</span>` : ''}${sponsorOfferBadgesHtml(o)}</h4>
           <div class="info-row"><span>Prime de signature</span><span><b>${formatMoney(o.signingBonus)}</b></span></div>
           <div class="info-row"><span>Revenus mensuels</span><span><b>${formatMoney(o.monthlyRevenue)}</b></span></div>
           <div class="info-row"><span>Durée</span><span><b>${o.durationMonths} mois</b></span></div>
@@ -18768,11 +18952,11 @@ function merchProductCardHtml(product){
 // laisse aucune trace).
 let merchDesigner = null;
 // Bandeau des sponsors sous contrat, façon bande de logos d'une vraie
-// boutique d'organisation — mais aucun sponsor n'a de vrai logo importé
-// pour l'instant (voir SPONSOR_POOL, de simples noms), donc chaque marque
-// s'affiche en texte plutôt qu'une icône vide/générique qui mentirait sur
-// ce qui existe vraiment. Rien de contractuel avec le rayon Merch
-// lui-même — juste un rappel visuel de qui soutient le club.
+// boutique d'organisation — vrai logo détouré (voir sponsorLogoIconHtml,
+// détection automatique par nom de fichier) quand un fichier existe dans
+// Logo/marques/, sinon repli sur l'icône générique. Rien de contractuel
+// avec le rayon Merch lui-même — juste un rappel visuel de qui soutient le
+// club.
 function merchSponsorStripHtml(){
   const sponsors = [];
   if(state.sponsorContract) sponsors.push(state.sponsorContract.name);
@@ -18781,7 +18965,7 @@ function merchSponsorStripHtml(){
   return `
     <div class="merch-sponsor-strip">
       <span class="merch-sponsor-strip-label"><i class="fa-solid fa-handshake"></i> Partenaires</span>
-      ${sponsors.map(n=>`<span class="merch-sponsor-pill">${n}</span>`).join('')}
+      ${sponsors.map(n=>`<span class="merch-sponsor-pill">${sponsorLogoIconHtml(n, 'fa-shop')} ${n}</span>`).join('')}
     </div>
   `;
 }
