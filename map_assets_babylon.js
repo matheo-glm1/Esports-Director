@@ -1,4 +1,4 @@
-// map_assets_babylon.js — Portage Babylon.js de map_assets.js (Three.js r128).
+﻿// map_assets_babylon.js — Portage Babylon.js de map_assets.js (Three.js r128).
 // Bibliothèque d'assets 3D partagée entre l'éditeur de carte
 // (map_editor.html) et les moteurs de match 3D. Voir le plan de migration
 // (Phase 1) : même contrat public que l'original (window.MapAssets.ASSETS
@@ -194,6 +194,48 @@ window.MapAssets = (function(){
     const tex = new BABYLON.DynamicTexture(key, canvasEl, _scene, true);
     tex.update(); // requis : sans ça la texture ne s'affiche jamais (voir note ci-dessus)
     return tex;
+  }
+  // Normal map dérivée de la luminance d'une texture couleur déjà dessinée
+  // (technique "bump from diffuse" — pas de canal hauteur dédié à
+  // maintenir en plus de chaque texture procédurale, juste un passage
+  // Sobel sur ce qui existe déjà). Suffisant pour donner un vrai relief
+  // de surface (grain de béton, joints de brique, aspérités de roche...)
+  // sous l'éclairage PBR, sans dupliquer 15 générateurs de texture.
+  function deriveNormalMapFromCanvas(key, canvasEl, strength=1.6){
+    return cachedTexture(key+'_n', ()=>{
+      const w = canvasEl.width, h = canvasEl.height;
+      const srcCtx = canvasEl.getContext('2d');
+      const src = srcCtx.getImageData(0,0,w,h).data;
+      // Luminance en Float32Array (évite de rappeler getImageData par voisin)
+      const lum = new Float32Array(w*h);
+      for(let i=0;i<w*h;i++){
+        const o = i*4;
+        lum[i] = (src[o]*0.299 + src[o+1]*0.587 + src[o+2]*0.114) / 255;
+      }
+      const out = document.createElement('canvas'); out.width=w; out.height=h;
+      const octx = out.getContext('2d');
+      const img = octx.createImageData(w,h);
+      const at = (x,y)=> lum[((y+h)%h)*w + ((x+w)%w)]; // wrap : texture tileable, pas de bord artificiel
+      for(let y=0;y<h;y++){
+        for(let x=0;x<w;x++){
+          // Sobel 3x3
+          const gx = (at(x+1,y-1)+2*at(x+1,y)+at(x+1,y+1)) - (at(x-1,y-1)+2*at(x-1,y)+at(x-1,y+1));
+          const gy = (at(x-1,y+1)+2*at(x,y+1)+at(x+1,y+1)) - (at(x-1,y-1)+2*at(x,y-1)+at(x+1,y-1));
+          let nx = -gx*strength, ny = -gy*strength, nz = 1;
+          const len = Math.sqrt(nx*nx+ny*ny+nz*nz);
+          nx/=len; ny/=len; nz/=len;
+          const o = (y*w+x)*4;
+          img.data[o]   = Math.round((nx*0.5+0.5)*255);
+          img.data[o+1] = Math.round((ny*0.5+0.5)*255);
+          img.data[o+2] = Math.round((nz*0.5+0.5)*255);
+          img.data[o+3] = 255;
+        }
+      }
+      octx.putImageData(img,0,0);
+      const tex = wrapCanvasTexture(key+'_n', out);
+      tex.level = 0.7;
+      return tex;
+    });
   }
   function mkRepeatTex(tex, rx, ry){
     tex.wrapU = tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
@@ -694,6 +736,65 @@ window.MapAssets = (function(){
       return wrapCanvasTexture('graveldirt_'+baseHex, cv);
     });
   }
+  // Bitume : base sombre mouchetée + fissures de goudron fines — pas de
+  // marquage au sol peint (une ligne continue se répéterait mal une fois
+  // la texture tuilée ×2 sur la dalle, laissant une coupure visible).
+  function texAsphaltFloor(baseHex){
+    return cachedTexture('asphaltfloor_'+baseHex, ()=>{
+      const cv = document.createElement('canvas'); cv.width=cv.height=512;
+      const ctx = cv.getContext('2d');
+      ctx.scale(2,2);
+      const base = hexIntToColor3(baseHex);
+      ctx.fillStyle = base.toHexString(); ctx.fillRect(0,0,256,256);
+      for(let i=0;i<5000;i++){
+        const shade = base.scale(0.55+Math.random()*0.8);
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = shade.toHexString();
+        ctx.fillRect(Math.random()*256,Math.random()*256,1+Math.random(),1+Math.random());
+      }
+      ctx.globalAlpha=1;
+      // Fissures de goudron : traits fins en réseau, jamais rectilignes
+      for(let n=0;n<5;n++){
+        let x=Math.random()*256, y=Math.random()*256, ang=Math.random()*Math.PI*2;
+        ctx.strokeStyle = base.scale(0.35).toHexString(); ctx.lineWidth = 0.8; ctx.globalAlpha = 0.5;
+        ctx.beginPath(); ctx.moveTo(x,y);
+        for(let s=0;s<6;s++){ const len=8+Math.random()*14; x+=Math.cos(ang)*len; y+=Math.sin(ang)*len; ctx.lineTo(x,y); ang+=(Math.random()-0.5)*1.3; }
+        ctx.stroke();
+      }
+      ctx.globalAlpha=1;
+      addVignette(ctx,256,0.16);
+      return wrapCanvasTexture('asphaltfloor_'+baseHex, cv);
+    });
+  }
+  // Mousse : base pierre/terre + grosses touffes de mousse en grappes,
+  // plus dense sur les bords (façon dalle envahie depuis les joints).
+  function texMossFloor(baseHex){
+    return cachedTexture('mossfloor_'+baseHex, ()=>{
+      const cv = document.createElement('canvas'); cv.width=cv.height=512;
+      const ctx = cv.getContext('2d');
+      ctx.scale(2,2);
+      const base = hexIntToColor3(baseHex);
+      const stone = hexIntToColor3(0x7a7568);
+      ctx.fillStyle = stone.toHexString(); ctx.fillRect(0,0,256,256);
+      for(let i=0;i<26;i++){
+        const patch = hueJitter(base, 0.05, 0.2, 0.16);
+        ctx.globalAlpha = 0.75;
+        ctx.fillStyle = patch.toHexString();
+        const r = 12+Math.random()*24;
+        ctx.beginPath(); ctx.ellipse(Math.random()*256,Math.random()*256,r,r*(0.6+Math.random()*0.3),Math.random()*Math.PI,0,Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha=1;
+      for(let i=0;i<2400;i++){
+        const shade = base.scale(0.6+Math.random()*0.7);
+        ctx.globalAlpha = 0.45;
+        ctx.fillStyle = shade.toHexString();
+        ctx.fillRect(Math.random()*256,Math.random()*256,1.4,1.4);
+      }
+      ctx.globalAlpha=1;
+      addVignette(ctx,256,0.18);
+      return wrapCanvasTexture('mossfloor_'+baseHex, cv);
+    });
+  }
   function texPaveFloor(baseHex){
     return cachedTexture('pavefloor_'+baseHex, ()=>{
       const cv = document.createElement('canvas'); cv.width=cv.height=512;
@@ -1063,6 +1164,20 @@ window.MapAssets = (function(){
       tex.uScale = opts.repeatX ?? 1; tex.vScale = opts.repeatY ?? 1;
       mat.albedoTexture = tex;
       mat.albedoColor = new BABYLON.Color3(1,1,1); // laisse la texture porter la couleur
+      // Relief de surface réel (Phase 4, matériaux) : normal map dérivée de
+      // la luminance de CETTE MÊME texture couleur ("bump from diffuse"),
+      // mise en cache une seule fois par texture source (opts.map.name) —
+      // coût Sobel payé au chargement, jamais par frame. S'applique donc
+      // d'un coup à tout ce qui passe déjà par mkBox avec une texture :
+      // murs, sols, structures, props.
+      const normTex = deriveNormalMapFromCanvas(opts.map.name, opts.map.getContext().canvas);
+      const bump = normTex.clone();
+      bump.getContext().drawImage(normTex.getContext().canvas, 0, 0);
+      bump.update();
+      bump.wrapU = bump.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      bump.uScale = opts.repeatX ?? 1; bump.vScale = opts.repeatY ?? 1;
+      bump.level = 0.7;
+      mat.bumpTexture = bump;
     }
     m.material = mat;
     m.receiveShadows = true;
@@ -1417,6 +1532,25 @@ function addModularPlinth(parent, w, d, color){
   plinth.position.y = 0.15; plinth.metadata.castShadow = false;
   plinth.parent = parent;
 }
+// Moulure en relief + charnières sur un vantail de porte modulaire — les 6
+// variantes (béton/acier/labo/industriel/militaire/futuriste) n'avaient
+// qu'un vantail plat + une poignée, nettement plus pauvre que les murs du
+// même set (rivets/sacs de sable/beacons...). doorPanel est le mesh du
+// vantail déjà positionné : les enfants ajoutés ici sont donc en coordonnées
+// LOCALES à ce vantail (0,0 = son propre centre), peu importe où il se
+// trouve dans le monde.
+function addDoorPanelMolding(doorPanel, doorW, panelH, hingeColor){
+  [-panelH*0.22, panelH*0.22].forEach(my=>{
+    const molding = mkBox(doorW*0.72, panelH*0.4, 0.015, 0x1c1c1c, {roughness:0.6});
+    molding.position.set(0, my, 0.035); molding.metadata.castShadow = false;
+    molding.parent = doorPanel;
+  });
+  [-panelH*0.42, 0, panelH*0.42].forEach(hy=>{
+    const hinge = mkBox(0.05, 0.14, 0.03, hingeColor||0x1c1c1c, {metalness:0.6, roughness:0.4});
+    hinge.position.set(-doorW/2-0.03, hy, 0); hinge.metadata.castShadow = false;
+    hinge.parent = doorPanel;
+  });
+}
 // Détail générique réutilisable — un mélange aléatoire (éclat de coin,
 // fissure, coulure/tache, boulons) posé sur un mur w×h×d déjà grondé en
 // 0..h (comme mkBox). Pensé pour les murs "matière brute" qui n'avaient
@@ -1509,6 +1643,7 @@ function addWeathering(parent, w, h, d, opts={}){
       const pierR = panel(pierW,H,D,c); pierR.position.x = (doorW/2+pierW/2); pierR.parent = g;
       const lintel = mkBox(doorW,lintelH,D,c,{map:texConcrete(c),repeatX:0.9,repeatY:0.3}); lintel.position.y = H - lintelH/2; lintel.parent = g;
       const doorPanel = mkBox(doorW-0.1,H*0.75,0.06,0x3a3a3a,{metalness:0.3,roughness:0.5}); doorPanel.position.set(0,H*0.375,0.02); doorPanel.parent = g;
+      addDoorPanelMolding(doorPanel, doorW-0.1, H*0.75, TRIM);
       const handle = mkCyl(0.03,0.03,0.22,0xd9d9d9,8); handle.rotation.z=Math.PI/2; handle.position.set(doorW/2-0.55,H*0.37,0.07); handle.parent = g;
       addModularPlinth(pierL, pierW, D, TRIM); addModularPlinth(pierR, pierW, D, TRIM);
       details(pierL, pierW, H, D, c); details(pierR, pierW, H, D, c);
@@ -1590,6 +1725,7 @@ function addWeathering(parent, w, h, d, opts={}){
       const pierR = panel(pierW,H,D,c); pierR.position.x = (doorW/2+pierW/2); pierR.parent = g;
       const lintel = mkBox(doorW,lintelH,D,c,{metalness:0.7,roughness:0.35,map:texMetalFloor(c),repeatX:0.9,repeatY:0.3}); lintel.position.y = H - lintelH/2; lintel.parent = g;
       const doorPanel = mkBox(doorW-0.1,H*0.75,0.06,0x2a2e33,{metalness:0.6,roughness:0.4}); doorPanel.position.set(0,H*0.375,0.02); doorPanel.parent = g;
+      addDoorPanelMolding(doorPanel, doorW-0.1, H*0.75, TRIM);
       const handle = mkCyl(0.03,0.03,0.22,0xd9d9d9,8); handle.rotation.z=Math.PI/2; handle.position.set(doorW/2-0.55,H*0.37,0.07); handle.parent = g;
       addModularPlinth(pierL, pierW, D, TRIM); addModularPlinth(pierR, pierW, D, TRIM);
       rivets(pierL, pierW, H, D, 2, 3); rivets(pierR, pierW, H, D, 2, 3);
@@ -1649,6 +1785,7 @@ function addWeathering(parent, w, h, d, opts={}){
       const g = group(panel(4,H,D,c));
       addModularPlinth(g, 4, D, TRIM);
       const door = mkBox(1.4,H*0.75,D+0.02,0xd6dde0); door.position.set(-1,H*0.375,0); door.parent = g;
+      addDoorPanelMolding(door, 1.4, H*0.75, TRIM);
       accessLed(g, -0.25, H*0.6, D/2+0.02);
       const reader = mkBox(0.15,0.22,0.04,0x33373d); reader.position.set(-0.25,H*0.45,D/2+0.02); reader.parent = g;
       return g;
@@ -1721,6 +1858,7 @@ function addWeathering(parent, w, h, d, opts={}){
       const pierR = panel(pierW,H,D,c); pierR.position.x = (doorW/2+pierW/2); pierR.parent = g;
       const lintel = mkBox(doorW,lintelH,D,c,{metalness:0.2,map:texCorrugated(c),repeatX:doorW*1.5,repeatY:0.2}); lintel.position.y = H - lintelH/2; lintel.parent = g;
       const doorPanel = mkBox(doorW-0.1,H*0.66,0.06,0x2e3238,{metalness:0.5,roughness:0.5}); doorPanel.position.set(0,H*0.33,0.02); doorPanel.parent = g;
+      addDoorPanelMolding(doorPanel, doorW-0.1, H*0.66, TRIM);
       addModularPlinth(pierL, pierW, D, TRIM); addModularPlinth(pierR, pierW, D, TRIM);
       const clamp = mkBox(0.5,0.05,D+0.02,0x1c1c1c); clamp.position.set(0,H*0.85,0); clamp.parent = g;
       return g;
@@ -1794,6 +1932,7 @@ function addWeathering(parent, w, h, d, opts={}){
       const pierR = panel(pierW,H,D,c); pierR.position.x = (doorW/2+pierW/2); pierR.parent = g;
       const lintel = mkBox(doorW,lintelH,D,c,{map:texConcrete(c),repeatX:0.9,repeatY:0.3}); lintel.position.y = H - lintelH/2; lintel.parent = g;
       const doorPanel = mkBox(doorW-0.1,H*0.75,0.06,0x2e3320,{metalness:0.2,roughness:0.7}); doorPanel.position.set(0,H*0.375,0.02); doorPanel.parent = g;
+      addDoorPanelMolding(doorPanel, doorW-0.1, H*0.75, TRIM);
       addModularPlinth(pierL, pierW, D, TRIM); addModularPlinth(pierR, pierW, D, TRIM);
       sandbags(pierL, pierW, D, 2); sandbags(pierR, pierW, D, 2);
       const ammoBox = mkBox(0.5,0.35,0.4,0x3f4a2e); ammoBox.position.set(doorW/2+pierW*0.5,0.18,D/2-0.05); ammoBox.parent = g;
@@ -1871,6 +2010,7 @@ function addWeathering(parent, w, h, d, opts={}){
       const doorPanel = mkBox(doorW-0.1,H*0.7,0.06,0x1a2540,{metalness:0.4,roughness:0.3}); doorPanel.position.set(0,H*0.35,0.02);
       doorPanel.material.emissiveColor = hexIntToColor3(0x4ecdc4).scale(0.15);
       doorPanel.parent = g;
+      addDoorPanelMolding(doorPanel, doorW-0.1, H*0.7, 0x4ecdc4);
       addModularPlinth(pierL, pierW, D, TRIM); addModularPlinth(pierR, pierW, D, TRIM);
       beacons(g, doorW+pierW*2);
       return g;
@@ -1908,6 +2048,24 @@ registerAsset({ id:'wall_wood', cat:'walls', family:'Matériaux naturels', label
     const beamBot = mkBox(4.1,0.15,0.36,0x4a3420); beamBot.position.y=0.08; beamBot.parent = g;
     addSeams(g,7,4,3,0.3,'x',0x5a3f26,0.015);
     addWeathering(g,4,3,0.3,{stainColor:0x3f5a2c});
+    return g;
+  }});
+// Haie végétale — le catalogue de murs n'avait que du minéral/bois/métal,
+// jamais d'option végétale (utile en prairie/jardin, ou pour rompre la
+// monotonie d'un enclos entièrement en pierre).
+registerAsset({ id:'wall_hedge', cat:'walls', family:'Matériaux naturels', label:'Haie', icon:'🌳', color:0x4a6a34, size:[4,1.6,0.6],
+  build:(c)=>{
+    const g = group(mkBox(4,1.6,0.6,c,{map:texLeafy(c),repeatX:3,repeatY:1.2,roughness:1}));
+    let seed = 41; const rnd = ()=>{ seed=(seed*9301+49297)%233280; return seed/233280; };
+    for(let i=0;i<10;i++){
+      const w = 0.25+rnd()*0.2;
+      const card = BABYLON.MeshBuilder.CreatePlane(_uid('hedgeLeafCard'), {width:w, height:w*1.1}, _scene);
+      card.material = mkLeafCardMat(c);
+      card.position.set(-1.85+rnd()*3.7, 0.15+rnd()*1.3, 0.28+rnd()*0.12);
+      card.rotation.set((rnd()-0.5)*0.6, rnd()*Math.PI, (rnd()-0.5)*0.6);
+      card.metadata = {castShadow:true};
+      card.parent = g;
+    }
     return g;
   }});
 registerAsset({ id:'wall_castle', cat:'walls', family:'Historique', label:'Château', icon:'🏰', color:0x9a9284, size:[4,0.6,3.6],
@@ -2245,7 +2403,7 @@ registerAsset({ id:'gate_metal', cat:'walls', family:'Portails', label:'Portail 
 
 // ---- COUVERTURES ---- même logique : volumes secondaires (lattes,
 // nervures, renforts, roues...) plutôt qu'un simple pavé.
-registerAsset({ id:'cover_crate', cat:'covers', label:'Caisse', icon:'📦', color:0x8a6a3f, size:[1.4,1.4,1.4],
+registerAsset({ id:'cover_crate', cat:'covers', family:'Caisses & palettes', label:'Caisse', icon:'📦', color:0x8a6a3f, size:[1.4,1.4,1.4],
   build:(c)=>{
     const g = group(mkBox(1.4,1.4,1.4,c,{map:texWoodFloor(c),repeatX:1.5,repeatY:1.5}));
     // cornières aux 4 arêtes verticales
@@ -2276,7 +2434,7 @@ registerAsset({ id:'cover_crate', cat:'covers', label:'Caisse', icon:'📦', col
     const fragile = mkCyl(0.09,0.09,0.02,0xd6342a,3); fragile.rotation.x=Math.PI/2; fragile.position.set(0.35,0.5,0.71); fragile.metadata={castShadow:false}; fragile.parent=g;
     return g;
   }});
-registerAsset({ id:'cover_pallet', cat:'covers', label:'Palette', icon:'🟫', color:0x9a7a4a, size:[1.6,1.2,0.3],
+registerAsset({ id:'cover_pallet', cat:'covers', family:'Caisses & palettes', label:'Palette', icon:'🟫', color:0x9a7a4a, size:[1.6,1.2,0.3],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('coverPalletGrp'), _scene);
     const cCol = hexIntToColor3(c);
@@ -2308,7 +2466,7 @@ registerAsset({ id:'cover_pallet', cat:'covers', label:'Palette', icon:'🟫', c
     const splint = mkBox(0.5,0.08,0.2,0x8a6a3f); splint.position.set(0,0.26,-0.5); splint.metadata={castShadow:false}; splint.parent=g;
     return g;
   }});
-registerAsset({ id:'cover_container', cat:'covers', label:'Container', icon:'🚢', color:0xc0472b, size:[6,2.5,2.4],
+registerAsset({ id:'cover_container', cat:'covers', family:'Caisses & palettes', label:'Container', icon:'🚢', color:0xc0472b, size:[6,2.5,2.4],
   build:(c)=>{
     const g = group(mkBox(6,2.5,2.4,c,{metalness:0.3,map:texCorrugated(c),repeatX:8,repeatY:1}));
     for(let i=1;i<12;i++){ // nervures corruguées le long du container
@@ -2345,7 +2503,7 @@ registerAsset({ id:'cover_container', cat:'covers', label:'Container', icon:'�
     }
     return g;
   }});
-registerAsset({ id:'cover_barrier', cat:'covers', label:'Barrière', icon:'🚧', color:0xd6a020, size:[2.4,1.1,0.3],
+registerAsset({ id:'cover_barrier', cat:'covers', family:'Fortification', label:'Barrière', icon:'🚧', color:0xd6a020, size:[2.4,1.1,0.3],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('coverBarrierGrp'), _scene);
     const top = mkBox(2.4,0.18,0.3,c); top.position.y=0.95; top.parent=g;
@@ -2388,7 +2546,7 @@ registerAsset({ id:'cover_barrier', cat:'covers', label:'Barrière', icon:'🚧'
     });
     return g;
   }});
-registerAsset({ id:'cover_bunker', cat:'covers', label:'Bunker', icon:'🛡️', color:0x6b6b60, size:[3,1.6,3],
+registerAsset({ id:'cover_bunker', cat:'covers', family:'Fortification', label:'Bunker', icon:'🛡️', color:0x6b6b60, size:[3,1.6,3],
   build:(c)=>{
     const g = group(mkBox(3,1.6,3,c,{map:texConcrete(c),repeatX:2,repeatY:1}), (()=>{ const t=mkBox(3.2,0.3,3.2,c); t.position.y=1.6; return t; })());
     // ceinture de sacs de sable tout autour de la base
@@ -2414,7 +2572,7 @@ registerAsset({ id:'cover_bunker', cat:'covers', label:'Bunker', icon:'🛡️',
     const periscope = mkCyl(0.04,0.04,0.5,0x2a2a2a,6); periscope.position.set(-0.8,1.9,0.6); periscope.parent=g;
     return g;
   }});
-registerAsset({ id:'cover_vehicle', cat:'covers', label:'Véhicule', icon:'🚙', color:0x3a4a5a, size:[4.2,1.6,2],
+registerAsset({ id:'cover_vehicle', cat:'covers', family:'Urbain', label:'Véhicule', icon:'🚙', color:0x3a4a5a, size:[4.2,1.6,2],
   build:(c)=>{
     const g = group(mkBox(4.2,1.3,2,c), (()=>{ const cab=mkBox(2,0.9,1.9,c); cab.position.set(-0.3,1.3,0); return cab; })());
     const glass = mkBox(1.8,0.6,1.95,0x9dd8e0,{opacity:0.4,roughness:0.05}); glass.position.set(-0.3,1.55,0); glass.parent=g;
@@ -2459,7 +2617,7 @@ registerAsset({ id:'cover_vehicle', cat:'covers', label:'Véhicule', icon:'🚙'
     return g;
   }});
 
-registerAsset({ id:'cover_sandbags', cat:'covers', label:'Sacs de sable', icon:'🟫', color:0x9c8a5e, size:[1.8,0.7,0.8],
+registerAsset({ id:'cover_sandbags', cat:'covers', family:'Fortification', label:'Sacs de sable', icon:'🟫', color:0x9c8a5e, size:[1.8,0.7,0.8],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('coverSandbagsGrp'), _scene);
     const rows = 2, perRow = 4;
@@ -2473,10 +2631,10 @@ registerAsset({ id:'cover_sandbags', cat:'covers', label:'Sacs de sable', icon:'
     }
     return g;
   }});
-registerAsset({ id:'cover_concrete_block', cat:'covers', label:'Bloc de béton', icon:'⬛', color:0x8a8a86,
+registerAsset({ id:'cover_concrete_block', cat:'covers', family:'Fortification', label:'Bloc de béton', icon:'⬛', color:0x8a8a86,
   size:[1.6,0.6,0.6],
   build:(c)=>{ const g = group(mkBox(1.6,0.6,0.6,c,{roughness:0.9})); addWeathering(g,1.6,0.6,0.6,{stainColor:0x3a3a34}); return g; }});
-registerAsset({ id:'cover_metal_barricade', cat:'covers', label:'Muret métallique', icon:'🚧', color:0x5c6470,
+registerAsset({ id:'cover_metal_barricade', cat:'covers', family:'Fortification', label:'Muret métallique', icon:'🚧', color:0x5c6470,
   size:[1.8,0.9,0.15],
   build:(c)=>{
     const g = group(mkBox(1.8,0.9,0.1,c,{metalness:0.4,roughness:0.5}));
@@ -2484,12 +2642,72 @@ registerAsset({ id:'cover_metal_barricade', cat:'covers', label:'Muret métalliq
     const stripe = mkBox(1.7,0.12,0.11,0xf0c020); stripe.position.y=0.15; stripe.parent=g;
     return g;
   }});
-registerAsset({ id:'cover_dumpster', cat:'covers', label:'Benne à déchets', icon:'🗑️', color:0x4a6a4a,
+registerAsset({ id:'cover_dumpster', cat:'covers', family:'Urbain', label:'Benne à déchets', icon:'🗑️', color:0x4a6a4a,
   size:[1.6,1.1,1.0],
   build:(c)=>{
     const g = group(mkBox(1.6,1.0,1.0,c,{roughness:0.8}));
     const lid = mkBox(1.7,0.08,1.05,c,{roughness:0.7}); lid.position.y=0.54; lid.rotation.z=0.12; lid.parent=g;
     for(const sx of [-0.6,0.6]){ const wheel = mkCyl(0.1,0.1,0.06,0x1a1a1a,10); wheel.rotation.x=Math.PI/2; wheel.position.set(sx,0.1,0.45); wheel.parent=g; }
+    return g;
+  }});
+// Tas de gravats : chunks de béton anguleux de tailles mêlées + fers à
+// béton tordus qui dépassent — couverture "bâtiment détruit", absente
+// jusqu'ici (le seul décor de ruine existait côté Structures/Murs, jamais
+// en couverture de combat au sol).
+registerAsset({ id:'cover_rubble', cat:'covers', family:'Débris', label:'Tas de gravats', icon:'🧱', color:0x8a8578, size:[1.8,0.7,1.6],
+  build:(c)=>{
+    const g = new BABYLON.TransformNode(_uid('coverRubbleGrp'), _scene);
+    let seed = 17; const rnd = ()=>{ seed=(seed*9301+49297)%233280; return seed/233280; };
+    for(let i=0;i<9;i++){
+      const s = 0.22+rnd()*0.32;
+      const chunk = mkBox(s,s*(0.6+rnd()*0.5),s*(0.8+rnd()*0.4), shade(c,0.7+rnd()*0.5), {roughness:0.95});
+      chunk.position.set((rnd()-0.5)*1.5, s*0.4+rnd()*0.18, (rnd()-0.5)*1.3);
+      chunk.rotation.set(rnd()*0.6,rnd()*Math.PI*2,rnd()*0.6);
+      chunk.parent = g;
+    }
+    for(let i=0;i<5;i++){
+      const rebar = mkCyl(0.018,0.018,0.4+rnd()*0.35,0x5a4a3a,5);
+      rebar.position.set((rnd()-0.5)*1.4, 0.15+rnd()*0.25, (rnd()-0.5)*1.2);
+      rebar.rotation.set(rnd()*1.2-0.6, rnd()*Math.PI*2, 0.7+rnd()*0.6);
+      rebar.metadata = {castShadow:true};
+      rebar.parent = g;
+    }
+    return g;
+  }});
+// Meule de foin : ferme/campagne, thème encore absent des couvertures
+// (uniquement urbain/militaire jusqu'ici).
+registerAsset({ id:'cover_haybale', cat:'covers', family:'Rural', label:'Meule de foin', icon:'🌾', color:0xd4b158, size:[1.5,1.0,0.8],
+  build:(c)=>{
+    const g = new BABYLON.TransformNode(_uid('coverHaybaleGrp'), _scene);
+    const positions = [[-0.4,0.4,0],[0.4,0.4,0],[0,1.1,0]];
+    positions.forEach(([px,py,pz])=>{
+      const bale = mkCyl(0.42,0.42,0.75,c,12); bale.rotation.z=Math.PI/2;
+      bale.position.set(px,py,pz); bale.parent=g;
+      for(let i=1;i<4;i++){
+        const band = mkBox(0.03,0.86,0.86,shade(c,0.55)); band.rotation.z=Math.PI/2;
+        band.position.set(px+(-0.28+i*0.19),py,pz); band.metadata={castShadow:false}; band.parent=g;
+      }
+    });
+    return g;
+  }});
+// Congère de neige tassée : la toundra n'avait aucune couverture propre
+// à son thème (les seuls éléments neige/glace étaient en Nature, jamais
+// utilisables comme couverture de combat).
+registerAsset({ id:'cover_snowbank', cat:'covers', family:'Naturel', label:'Congère', icon:'❄️', color:0xeef4f6, size:[2.0,0.75,1.1],
+  build:(c)=>{
+    const g = new BABYLON.TransformNode(_uid('coverSnowbankGrp'), _scene);
+    const mound = BABYLON.MeshBuilder.CreateSphere(_uid('snowbankMound'), {diameter:1.9, segmentsW:12, segmentsH:8, slice:0.55}, _scene);
+    const moundMat = mkStdMat(_uid('snowbankMoundMat'), _scene);
+    moundMat.diffuseColor = hexIntToColor3(c); moundMat.metadata = {roughness:0.8};
+    mound.material = moundMat; mound.scaling.set(1,0.62,0.62); mound.metadata={castShadow:true};
+    mound.parent = g;
+    let seed = 31; const rnd = ()=>{ seed=(seed*9301+49297)%233280; return seed/233280; };
+    for(let i=0;i<4;i++){
+      const drift = BABYLON.MeshBuilder.CreateSphere(_uid('snowbankDrift'), {diameter:0.5+rnd()*0.4, segmentsW:8, segmentsH:6, slice:0.5}, _scene);
+      drift.material = moundMat; drift.scaling.set(1,0.5,0.5);
+      drift.position.set((rnd()-0.5)*1.5, 0.02, (rnd()-0.5)*0.8);
+      drift.metadata={castShadow:false}; drift.parent=g;
+    }
     return g;
   }});
 
@@ -3378,6 +3596,28 @@ registerAsset({ id:'struct_railing_metal', cat:'structures', family:'Urbain & co
       arm2.parent = g;
       return g;
     }});
+  // Agave — silhouette en rosette basse (feuilles pointues rayonnant au
+  // ras du sol), très différente des cactus cylindriques déjà présents ;
+  // le désert n'avait que cette seule famille de forme jusqu'ici.
+  registerAsset({ id:'nat_agave', cat:'nature', family:'Cactus', label:'Agave', icon:'🌵', color:0x5c8a5c, size:[0.9,0.5,0.9],
+    build:(c)=>{
+      const g = new BABYLON.TransformNode(_uid('agaveGrp'), _scene);
+      let seed = 53; const rnd = ()=>{ seed=(seed*9301+49297)%233280; return seed/233280; };
+      const leafMat = mkStdMat(_uid('agaveLeafMat'), _scene);
+      leafMat.diffuseColor = hexIntToColor3(c); leafMat.metadata = {roughness:0.6}; leafMat.backFaceCulling = false;
+      for(let i=0;i<11;i++){
+        const len = 0.35+rnd()*0.15;
+        const leaf = BABYLON.MeshBuilder.CreateCylinder(_uid('agaveLeaf'), {diameterTop:0.01,diameterBottom:0.09,height:len,tessellation:5}, _scene);
+        leaf.material = leafMat;
+        const ang = (i/11)*Math.PI*2 + rnd()*0.3;
+        const tilt = 0.9+rnd()*0.35;
+        leaf.position.set(Math.sin(ang)*0.05, len/2*Math.cos(tilt), Math.cos(ang)*0.05);
+        leaf.rotation.set(Math.cos(ang)*tilt, -ang, Math.sin(ang)*tilt);
+        leaf.metadata = {castShadow:true};
+        leaf.parent = g;
+      }
+      return g;
+    }});
 
   // -- Roches & minéraux (7) --
   registerAsset({ id:'nat_rock2', cat:'nature', family:'Roches & minéraux', label:'Roche', icon:'🪨', color:0x847f70, size:[0.8,0.6,0.8],
@@ -3387,8 +3627,7 @@ registerAsset({ id:'struct_railing_metal', cat:'structures', family:'Urbain & co
   registerAsset({ id:'nat_cliff', cat:'nature', family:'Roches & minéraux', label:'Falaise', icon:'⛰️', color:0x6f6a5f, size:[4,5,3],
     build:(c)=>{
       const g = new BABYLON.TransformNode(_uid('cliffGrp'), _scene);
-      const blockMat = mkStdMat(_uid('cliffBlockMat'), _scene);
-      blockMat.diffuseColor = hexIntToColor3(c); blockMat.metadata = {roughness:0.97};
+      const blockMat = mkRockMat(c);
       for(let i=0;i<5;i++){
         const bw = 1+Math.random(), bh = 2+Math.random()*3, bd = 1.4+Math.random();
         const block = BABYLON.MeshBuilder.CreateBox(_uid('cliffBlock'), {width:bw, height:bh, depth:bd}, _scene);
@@ -3403,8 +3642,7 @@ registerAsset({ id:'struct_railing_metal', cat:'structures', family:'Urbain & co
   registerAsset({ id:'nat_spire', cat:'nature', family:'Roches & minéraux', label:'Pic rocheux', icon:'🗻', color:0x8a8578, size:[1.5,6,1.5],
     build:(c)=>{
       const g = new BABYLON.TransformNode(_uid('spireGrp'), _scene);
-      const segMat = mkStdMat(_uid('spireSegMat'), _scene);
-      segMat.diffuseColor = hexIntToColor3(c); segMat.metadata = {roughness:0.95};
+      const segMat = mkRockMat(c);
       let curY = 0, curR = 0.9;
       for(let i=0;i<4;i++){
         const h = 1.4+Math.random()*1;
@@ -3443,7 +3681,8 @@ registerAsset({ id:'struct_railing_metal', cat:'structures', family:'Urbain & co
   registerAsset({ id:'nat_waterfall', cat:'nature', family:"Points d'eau", label:'Cascade', icon:'🌊', color:0x2f6f8f, size:[2,4,0.6],
     build:()=>{
       const g = new BABYLON.TransformNode(_uid('waterfallGrp'), _scene);
-      const sheet = mkBox(1.8,3.6,0.15,0x2f6f8f,{opacity:0.72});
+      const sheet = BABYLON.MeshBuilder.CreateBox(_uid('waterfallSheet'), {width:1.8, height:3.6, depth:0.15}, _scene);
+      sheet.material = mkWaterMat(0x2f6f8f, 0.72); // même traitement que le bassin en dessous
       sheet.position.y = 1.8;
       sheet.parent = g;
       const pool = buildWaterPatch(0x2f6f8f, 2.6, 1.6);
@@ -3454,7 +3693,8 @@ registerAsset({ id:'struct_railing_metal', cat:'structures', family:'Urbain & co
   registerAsset({ id:'nat_river', cat:'nature', family:"Points d'eau", label:'Rivière', icon:'🏞️', color:0x2f6f8f, size:[6,0.2,2.4],
     build:()=>{
       const g = new BABYLON.TransformNode(_uid('riverGrp'), _scene);
-      const strip = mkBox(6,0.1,2.2,0x2f6f8f,{opacity:0.78});
+      const strip = BABYLON.MeshBuilder.CreateBox(_uid('riverStrip'), {width:6, height:0.1, depth:2.2}, _scene);
+      strip.material = mkWaterMat(0x2f6f8f, 0.78); // même traitement que lac/étang (reflets IBL + relief), pas le mkBox générique
       strip.position.y = 0.06;
       strip.parent = g;
       return g;
@@ -3755,16 +3995,28 @@ registerAsset({ id:'struct_railing_metal', cat:'structures', family:'Urbain & co
 // BÂTIMENTS THÉMATIQUES — 49 structures, construites à partir de
 // quelques familles de formes partagées pour rester lisible.
 // ============================================================
+// Sélectionne une texture procédurale déjà existante (bois/enduit) selon la
+// teinte du hex fourni — évite d'ajouter un paramètre de matériau sur les ~35
+// bâtiments qui appellent buildSimpleHouse/buildTower/buildBridgeSpan : ces
+// couleurs ont déjà été choisies pour évoquer le bon matériau (bois brun pour
+// une "Maison en bois", pierre grise pour un "Fort"...), donc leur teinte
+// suffit à deviner texWoodFloor (bois, chaud+saturé+sombre) vs texStuc
+// (pierre/enduit/béton, le reste).
+function pickBuildingTexture(hex){
+  const r=(hex>>16)&255, g=(hex>>8)&255, b=hex&255;
+  const warmth = r-b, sat = Math.max(r,g,b)-Math.min(r,g,b);
+  return (warmth>40 && sat>30 && r<200) ? texWoodFloor(hex) : texStuc(hex);
+}
 function buildSimpleHouse(wallColor, roofColor, w,d,h, roofStyle){
   const g = new BABYLON.TransformNode(_uid('house'), _scene);
-  const walls = mkBox(w,h,d,wallColor,{roughness:0.9}); walls.parent = g;
+  const walls = mkBox(w,h,d,wallColor,{roughness:0.9,map:pickBuildingTexture(wallColor),repeatX:Math.max(1,w/2.3),repeatY:Math.max(1,h/2.1)}); walls.parent = g;
   if(roofStyle==='pitched'){
     const span=w*0.6, depth=d*0.85;
-    const rA=mkBox(span,0.14,depth,roofColor); rA.position.set(-w*0.24,h+span*0.42,0); rA.rotation.z=0.55; rA.parent = g;
-    const rB=mkBox(span,0.14,depth,roofColor); rB.position.set(w*0.24,h+span*0.42,0); rB.rotation.z=-0.55; rB.parent = g;
+    const rA=mkBox(span,0.14,depth,roofColor,{map:pickBuildingTexture(roofColor),repeatX:Math.max(1,span/1.5),repeatY:Math.max(1,depth/1.5)}); rA.position.set(-w*0.24,h+span*0.42,0); rA.rotation.z=0.55; rA.parent = g;
+    const rB=mkBox(span,0.14,depth,roofColor,{map:pickBuildingTexture(roofColor),repeatX:Math.max(1,span/1.5),repeatY:Math.max(1,depth/1.5)}); rB.position.set(w*0.24,h+span*0.42,0); rB.rotation.z=-0.55; rB.parent = g;
     const chimney=mkBox(w*0.13,h*0.5,w*0.13,0x5c5850); chimney.position.set(w*0.26,h+span*0.42*1.35,d*0.18); chimney.parent = g;
   } else if(roofStyle==='flat'){
-    const roof=mkBox(w*1.05,0.2,d*1.05,roofColor); roof.position.y=h+0.1; roof.parent = g;
+    const roof=mkBox(w*1.05,0.2,d*1.05,roofColor,{map:pickBuildingTexture(roofColor),repeatX:Math.max(1,w/2),repeatY:Math.max(1,d/2)}); roof.position.y=h+0.1; roof.parent = g;
   } else if(roofStyle==='dome'){
     const dome=BABYLON.MeshBuilder.CreateSphere(_uid('dome'), {diameter:w*0.55*2, segments:10, slice:0.5}, _scene);
     const domeMat = mkStdMat(_uid('mat'), _scene);
@@ -3793,9 +4045,37 @@ function buildSimpleHouse(wallColor, roofColor, w,d,h, roofStyle){
   const step = mkBox(Math.min(1.1,w*0.3),0.1,0.3,0x8a8578); step.position.set(0,0.05,d/2+0.2); step.parent = g;
   return g;
 }
+// Fût de tour texturé — mkCyl() n'accepte pas d'option "map" (signature
+// figée, appelée depuis des centaines d'autres sites du fichier), donc on
+// reconstruit ici le même schéma clone+bump que mkBarkSegment plutôt que d'y
+// toucher.
+// Cylindre/cône texturé générique — mkCyl() n'accepte pas d'option "map"
+// (signature figée, appelée depuis des centaines d'autres sites du fichier),
+// donc on reconstruit ici le même schéma clone+bump que mkBarkSegment plutôt
+// que d'y toucher. texSrc par défaut = pickBuildingTexture(color) (déduit
+// bois/pierre depuis la teinte) ; passer un autre générateur de texture
+// (texRockSurface, texWoodFloor...) pour un rendu différent.
+function mkTexturedCyl(rt, rb, h, color, segs=10, texSrc){
+  const m = BABYLON.MeshBuilder.CreateCylinder(_uid('texCyl'), {diameterTop:rt*2, diameterBottom:rb*2, height:h, tessellation:segs}, _scene);
+  const src = texSrc || pickBuildingTexture(color);
+  const tex = src.clone();
+  tex.getContext().drawImage(src.getContext().canvas, 0, 0);
+  tex.update();
+  tex.wrapU = tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+  tex.uScale = Math.max(1, Math.round((Math.PI*(rt+rb))/2));
+  tex.vScale = Math.max(1, Math.round(h/2));
+  m.material = mkPbrMat(_uid('texCylMat'), tex, 0.85);
+  m.receiveShadows = true;
+  m.metadata = { castShadow: true };
+  m.position.y = h/2;
+  return m;
+}
+function mkTexturedTowerShaft(rt, rb, h, color, segs=10){
+  return mkTexturedCyl(rt, rb, h, color, segs);
+}
 function buildTower(baseColor, w, h, capType){
   const g = new BABYLON.TransformNode(_uid('tower'), _scene);
-  const shaft=mkCyl(w*0.42,w*0.5,h,baseColor,10); shaft.parent = g;
+  const shaft=mkTexturedTowerShaft(w*0.42,w*0.5,h,baseColor,10); shaft.parent = g;
   if(capType==='cone'){
     const cap=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:w*0.55*2, height:h*0.35, tessellation:10}, _scene);
     const capMat = mkStdMat(_uid('mat'), _scene); capMat.diffuseColor = hexIntToColor3(0x4a3a2a);
@@ -3812,7 +4092,7 @@ function buildTower(baseColor, w, h, capType){
 }
 function buildBridgeSpan(color, len, railColor){
   const g = new BABYLON.TransformNode(_uid('bridge'), _scene);
-  const deck=mkBox(len,0.3,2.6,color); deck.position.y=2; deck.parent = g;
+  const deck=mkBox(len,0.3,2.6,color,{map:pickBuildingTexture(color),repeatX:Math.max(1,len/1.5),repeatY:1}); deck.position.y=2; deck.parent = g;
   for(const sx of [-1.25,1.25]){ const rail=mkBox(len*0.96,0.5,0.1,railColor||color); rail.position.set(0,2.4,sx); rail.parent = g; }
   for(let i=0;i<3;i++){ const pillar=mkCyl(0.3,0.4,2,color,8); pillar.position.set((i-1)*len*0.32,1,0); pillar.parent = g; }
   return g;
@@ -3944,12 +4224,11 @@ registerAsset({ id:'bld_suspbridge', cat:'structures', family:'Ponts', label:'Po
 
 // -- Structurel (3) --
 registerAsset({ id:'bld_stairs', cat:'structures', family:'Structurel', label:'Escalier', icon:'🪜', color:0x8a8578, size:[1.4,2,3],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); for(let i=0;i<8;i++){ const step=mkBox(1.4,0.2,0.4,c); step.position.set(0,0.1+i*0.24,-1.4+i*0.4); step.parent = g;} return g; }});
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const stepTex=texStuc(c); for(let i=0;i<8;i++){ const step=mkBox(1.4,0.2,0.4,c,{map:stepTex,repeatX:1,repeatY:1}); step.position.set(0,0.1+i*0.24,-1.4+i*0.4); step.parent = g;} return g; }});
 registerAsset({ id:'bld_ramp', cat:'structures', family:'Structurel', label:'Rampe', icon:'📐', color:0x6b6a5f, size:[2,1.5,4],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene);
-    const ramp=BABYLON.MeshBuilder.CreateBox(_uid('box'), {width:2,height:0.3,depth:4}, _scene);
-    const rampMat = mkStdMat(_uid('mat'), _scene); rampMat.diffuseColor = hexIntToColor3(c); rampMat.metadata = {roughness:0.85};
-    ramp.material = rampMat; ramp.rotation.x=-0.35; ramp.position.y=0.75; ramp.metadata = {castShadow:true}; ramp.receiveShadows=true; ramp.parent = g;
+    const ramp=mkBox(2,0.3,4,c,{roughness:0.85,map:texStuc(c),repeatX:1,repeatY:2});
+    ramp.rotation.x=-0.35; ramp.position.y=0.75; ramp.parent = g;
     // Bandes antidérapantes + garde-corps ajoutés comme ENFANTS du
     // plan incliné (pas du groupe) : ils héritent directement de sa
     // rotation, pas besoin de refaire la trigonométrie à la main.
@@ -3963,14 +4242,13 @@ registerAsset({ id:'bld_ramp', cat:'structures', family:'Structurel', label:'Ram
       rail.material = railMat; rail.position.set(sx,0.7,0); rail.metadata = {castShadow:false}; rail.parent = ramp; }
     return g; }});
 registerAsset({ id:'bld_column', cat:'structures', family:'Structurel', label:'Colonne', icon:'🏛️', color:0xe8ddc0, size:[0.6,3.5,0.6],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkCyl(0.32,0.36,0.2,c); base.parent = g; const shaft=mkCyl(0.24,0.24,3,c,12); shaft.position.y=1.7; shaft.parent = g; const cap=mkCyl(0.32,0.28,0.2,c); cap.position.y=3.3; cap.parent = g; return g; }});
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkCyl(0.32,0.36,0.2,c); base.parent = g; const shaft=mkTexturedCyl(0.24,0.24,3,c,12,texStuc(c)); shaft.position.y=1.7; shaft.parent = g; const cap=mkCyl(0.32,0.28,0.2,c); cap.position.y=3.3; cap.parent = g; return g; }});
 
 // -- Monuments (4) --
 registerAsset({ id:'bld_pyramid', cat:'structures', family:'Monuments', label:'Pyramide', icon:'🔺', color:0xd9c290, size:[6,4,6],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene);
-    const p=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:4*2, height:4, tessellation:4}, _scene);
-    const pMat = mkStdMat(_uid('mat'), _scene); pMat.diffuseColor = hexIntToColor3(c); pMat.metadata = {roughness:0.9};
-    p.material = pMat; p.convertToFlatShadedMesh(); p.rotation.y=Math.PI/4; p.position.y=2; p.metadata = {castShadow:true}; p.parent = g;
+    const p=mkTexturedCyl(0,4,4,c,4,texStuc(c));
+    p.convertToFlatShadedMesh(); p.rotation.y=Math.PI/4; p.parent = g;
     // Pierre de faîte distincte + entrée basse — un cône à 4 faces tout
     // seul se lit comme une simple forme géométrique, pas un monument.
     const cap=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.35*2, height:0.45, tessellation:4}, _scene);
@@ -3982,28 +4260,28 @@ registerAsset({ id:'bld_pyramid', cat:'structures', family:'Monuments', label:'P
     return g; }});
 registerAsset({ id:'bld_obelisk', cat:'structures', family:'Monuments', label:'Obélisque', icon:'🗿', color:0xc9a970, size:[1,5,1],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene);
-    const shaft=BABYLON.MeshBuilder.CreateCylinder(_uid('cyl'), {diameterTop:0.25*2, diameterBottom:0.4*2, height:4.4, tessellation:4}, _scene);
-    const shaftMat = mkStdMat(_uid('mat'), _scene); shaftMat.diffuseColor = hexIntToColor3(c); shaftMat.metadata = {roughness:0.85};
-    shaft.material = shaftMat; shaft.convertToFlatShadedMesh(); shaft.position.y=2.2; shaft.parent = g;
+    const shaft=mkTexturedCyl(0.25,0.4,4.4,c,4,texStuc(c));
+    shaft.convertToFlatShadedMesh(); shaft.parent = g;
     const tip=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.3*2, height:0.6, tessellation:4}, _scene);
     const tipMat = mkStdMat(_uid('mat'), _scene); tipMat.diffuseColor = hexIntToColor3(c);
     tip.material = tipMat; tip.position.y=4.7; tip.parent = g; return g; }});
 registerAsset({ id:'bld_ruins2', cat:'structures', family:'Monuments', label:'Ruine antique', icon:'🏛️', color:0xc9c0a8, size:[5,3,4],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); for(let i=0;i<4;i++){ const h=1.5+Math.random()*1.8; const col=mkCyl(0.22,0.22,h,c,10); col.position.set(-2+i*1.3,h/2,0); col.parent = g;}
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const colTex=texStuc(c); for(let i=0;i<4;i++){ const h=1.5+Math.random()*1.8; const col=mkTexturedCyl(0.22,0.22,h,c,10,colTex); col.position.set(-2+i*1.3,h/2,0); col.parent = g;}
     const rubble=BABYLON.MeshBuilder.CreatePolyhedron(_uid('poly'), {type:2, size:0.5}, _scene);
     const rubbleMat = mkStdMat(_uid('mat'), _scene); rubbleMat.diffuseColor = hexIntToColor3(c);
     rubble.material = rubbleMat; rubble.convertToFlatShadedMesh(); rubble.position.set(1.5,0.25,1); rubble.parent = g; return g; }});
 registerAsset({ id:'bld_arc', cat:'structures', family:'Monuments', label:'Arc de triomphe', icon:'🏛️', color:0xd8c8a0, size:[5,5,2],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const pillarL=mkBox(1,4.5,1.6,c); pillarL.position.x=-1.7; pillarL.parent = g;
-    const pillarR=mkBox(1,4.5,1.6,c); pillarR.position.x=1.7; pillarR.parent = g;
-    const top=mkBox(4.4,1,1.8,c); top.position.y=5; top.parent = g; return g; }});
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const arcTex=texStuc(c);
+    const pillarL=mkBox(1,4.5,1.6,c,{map:arcTex,repeatX:1,repeatY:2}); pillarL.position.x=-1.7; pillarL.parent = g;
+    const pillarR=mkBox(1,4.5,1.6,c,{map:arcTex,repeatX:1,repeatY:2}); pillarR.position.x=1.7; pillarR.parent = g;
+    const top=mkBox(4.4,1,1.8,c,{map:arcTex,repeatX:2,repeatY:1}); top.position.y=5; top.parent = g; return g; }});
 
 // -- Portails (2) --
 registerAsset({ id:'bld_castlegate', cat:'structures', family:'Portails', label:'Porte de château', icon:'🚪', color:0x7a776c, size:[3,4,1.2],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const towerL=buildTower(c,1.2,4,'crenel'); towerL.position.x=-1.6; towerL.parent = g;
     const towerR=buildTower(c,1.2,4,'crenel'); towerR.position.x=1.6; towerR.parent = g;
-    const arch=mkBox(2,1,1,c); arch.position.y=3.3; arch.parent = g;
-    const gate=mkBox(1.6,2.6,0.15,0x3a2a1e); gate.position.y=1.3; gate.parent = g; return g; }});
+    const arch=mkBox(2,1,1,c,{map:texStuc(c),repeatX:1,repeatY:1}); arch.position.y=3.3; arch.parent = g;
+    const gate=mkBox(1.6,2.6,0.15,0x3a2a1e,{map:texWoodFloor(0x3a2a1e),repeatX:1,repeatY:2}); gate.position.y=1.3; gate.parent = g; return g; }});
 registerAsset({ id:'bld_magicgate', cat:'structures', family:'Portails', label:'Portail magique', icon:'🌀', color:0x5c3a8a, size:[3,4,0.6],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene);
     const frame=BABYLON.MeshBuilder.CreateTorus(_uid('torus'), {diameter:1.5*2, thickness:0.25*2, tessellation:20}, _scene);
@@ -4016,20 +4294,20 @@ registerAsset({ id:'bld_magicgate', cat:'structures', family:'Portails', label:'
 
 // -- Points d'eau bâtis (2) --
 registerAsset({ id:'bld_well', cat:'structures', family:"Points d'eau bâtis", label:'Puits', icon:'⛲', color:0x8a8578, size:[1.4,1.5,1.4],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const wall=mkCyl(0.6,0.65,0.8,c,12); wall.parent = g;
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const wall=mkTexturedCyl(0.6,0.65,0.8,c,12,texStuc(c)); wall.parent = g;
     const water=BABYLON.MeshBuilder.CreateDisc(_uid('disc'), {radius:0.5, tessellation:12}, _scene);
-    const waterMat = mkStdMat(_uid('mat'), _scene); waterMat.diffuseColor = hexIntToColor3(0x2f6f8f);
-    water.material = waterMat; water.rotation.x=-Math.PI/2; water.position.y=0.81; water.parent = g;
+    water.material = mkWaterMat(0x2f6f8f, 1);
+    water.rotation.x=-Math.PI/2; water.position.y=0.81; water.parent = g;
     const postL=mkCyl(0.05,0.05,1.2,0x6b4a2e); postL.position.set(-0.5,0.8,0); postL.parent = g;
     const postR=mkCyl(0.05,0.05,1.2,0x6b4a2e); postR.position.set(0.5,0.8,0); postR.parent = g;
     const roof=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.8*2, height:0.5, tessellation:6}, _scene);
     const roofMat = mkStdMat(_uid('mat'), _scene); roofMat.diffuseColor = hexIntToColor3(0x3a2a1e);
     roof.material = roofMat; roof.position.y=1.65; roof.parent = g; return g; }});
 registerAsset({ id:'bld_fountain2', cat:'structures', family:"Points d'eau bâtis", label:'Fontaine', icon:'⛲', color:0xc9c0a8, size:[2.4,2,2.4],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const basin=mkCyl(1.1,1.2,0.4,c,16); basin.parent = g;
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const basin=mkTexturedCyl(1.1,1.2,0.4,c,16,texStuc(c)); basin.parent = g;
     const water=BABYLON.MeshBuilder.CreateDisc(_uid('disc'), {radius:1, tessellation:16}, _scene);
-    const waterMat = mkStdMat(_uid('mat'), _scene); waterMat.diffuseColor = hexIntToColor3(0x2f6f8f); waterMat.alpha = 0.8;
-    water.material = waterMat; water.rotation.x=-Math.PI/2; water.position.y=0.41; water.parent = g;
+    water.material = mkWaterMat(0x2f6f8f, 0.8);
+    water.rotation.x=-Math.PI/2; water.position.y=0.41; water.parent = g;
     const pedestal=mkCyl(0.2,0.25,1.2,c,10); pedestal.position.y=0.4; pedestal.parent = g;
     const top=mkCyl(0.35,0.35,0.15,c,10); top.position.y=1.62; top.parent = g; return g; }});
 
@@ -4108,18 +4386,18 @@ registerAsset({ id:'bld_hangar', cat:'structures', family:'Spéciaux', label:'Ha
 // DÉCORATION — 29 petits objets d'ambiance (mobilier, éclairage,
 // statuaire, signalétique). Nouvelle catégorie "props" dans la palette.
 // ============================================================
-registerAsset({ id:'prop_bench', cat:'props', label:'Banc', icon:'🪑', color:0x6b4a2e, size:[1.4,0.5,0.5],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const seat=mkBox(1.4,0.08,0.4,c); seat.position.y=0.42; seat.parent = g;
-    const back=mkBox(1.4,0.4,0.06,c); back.position.set(0,0.65,-0.18); back.parent = g;
+registerAsset({ id:'prop_bench', cat:'props', family:'Mobilier', label:'Banc', icon:'🪑', color:0x6b4a2e, size:[1.4,0.5,0.5],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const seat=mkBox(1.4,0.08,0.4,c,{map:texWoodFloor(c),repeatX:1.5,repeatY:1}); seat.position.y=0.42; seat.parent = g;
+    const back=mkBox(1.4,0.4,0.06,c,{map:texWoodFloor(c),repeatX:1.5,repeatY:1}); back.position.set(0,0.65,-0.18); back.parent = g;
     for(const x of [-0.6,0.6]){ const leg=mkBox(0.08,0.42,0.4,0x3a2a1e); leg.position.set(x,0.21,0); leg.parent = g;} return g; }});
-registerAsset({ id:'prop_table', cat:'props', label:'Table', icon:'🪵', color:0x6b4a2e, size:[1.4,0.8,0.9],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const top=mkBox(1.4,0.08,0.9,c); top.position.y=0.76; top.parent = g;
+registerAsset({ id:'prop_table', cat:'props', family:'Mobilier', label:'Table', icon:'🪵', color:0x6b4a2e, size:[1.4,0.8,0.9],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const top=mkBox(1.4,0.08,0.9,c,{map:texWoodFloor(c),repeatX:1.5,repeatY:1}); top.position.y=0.76; top.parent = g;
     for(const [x,z] of [[-0.6,-0.4],[0.6,-0.4],[-0.6,0.4],[0.6,0.4]]){ const leg=mkBox(0.08,0.76,0.08,0x3a2a1e); leg.position.set(x,0.38,z); leg.parent = g;} return g; }});
-registerAsset({ id:'prop_chair', cat:'props', label:'Chaise', icon:'🪑', color:0x6b4a2e, size:[0.5,0.9,0.5],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const seat=mkBox(0.45,0.06,0.45,c); seat.position.y=0.45; seat.parent = g;
-    const back=mkBox(0.45,0.45,0.05,c); back.position.set(0,0.7,-0.2); back.parent = g;
+registerAsset({ id:'prop_chair', cat:'props', family:'Mobilier', label:'Chaise', icon:'🪑', color:0x6b4a2e, size:[0.5,0.9,0.5],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const seat=mkBox(0.45,0.06,0.45,c,{map:texWoodFloor(c),repeatX:1,repeatY:1}); seat.position.y=0.45; seat.parent = g;
+    const back=mkBox(0.45,0.45,0.05,c,{map:texWoodFloor(c),repeatX:1,repeatY:1}); back.position.set(0,0.7,-0.2); back.parent = g;
     for(const [x,z] of [[-0.18,-0.18],[0.18,-0.18],[-0.18,0.18],[0.18,0.18]]){ const leg=mkBox(0.05,0.45,0.05,0x3a2a1e); leg.position.set(x,0.225,z); leg.parent = g;} return g; }});
-registerAsset({ id:'prop_barrel', cat:'props', label:'Tonneau', icon:'🛢️', color:0x8a6a3f, size:[0.6,0.8,0.6],
+registerAsset({ id:'prop_barrel', cat:'props', family:'Rangement', label:'Tonneau', icon:'🛢️', color:0x8a6a3f, size:[0.6,0.8,0.6],
   build:(c)=>{ const g = group(mkCyl(0.3,0.3,0.8,c,12));
     for(const hy of [0.15,0.4,0.65]){
       const hoop = BABYLON.MeshBuilder.CreateTorus(_uid('torus'), {diameter:0.305*2, thickness:0.02*2, tessellation:14}, _scene);
@@ -4129,78 +4407,78 @@ registerAsset({ id:'prop_barrel', cat:'props', label:'Tonneau', icon:'🛢️', 
     const lidMat = mkStdMat(_uid('mat'), _scene); lidMat.diffuseColor = hexIntToColor3(0x3a3a3a); lidMat.metadata = {metalness:0.3, roughness:0.6};
     lid.material = lidMat; lid.rotation.x=-Math.PI/2; lid.position.y=0.801; lid.parent = g;
     return g; }});
-registerAsset({ id:'prop_crate', cat:'props', label:'Caisse', icon:'📦', color:0x8a6a3f, size:[0.6,0.6,0.6],
-  build:(c)=>{ const g = group(mkBox(0.6,0.6,0.6,c));
+registerAsset({ id:'prop_crate', cat:'props', family:'Rangement', label:'Caisse', icon:'📦', color:0x8a6a3f, size:[0.6,0.6,0.6],
+  build:(c)=>{ const g = group(mkBox(0.6,0.6,0.6,c,{map:texWoodFloor(c),repeatX:1,repeatY:1}));
     for(const [sx,sz] of [[-0.28,-0.28],[0.28,-0.28],[-0.28,0.28],[0.28,0.28]]){
       const edge = mkBox(0.05,0.62,0.05,0x4a3520); edge.position.set(sx,0.31,sz); edge.metadata = {castShadow:false}; edge.parent = g;
     }
     return g; }});
-registerAsset({ id:'prop_chest', cat:'props', label:'Coffre', icon:'🧰', color:0x6b4a2e, size:[0.8,0.55,0.5],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(0.8,0.35,0.5,c); base.parent = g;
+registerAsset({ id:'prop_chest', cat:'props', family:'Rangement', label:'Coffre', icon:'🧰', color:0x6b4a2e, size:[0.8,0.55,0.5],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(0.8,0.35,0.5,c,{map:texWoodFloor(c),repeatX:1,repeatY:1}); base.parent = g;
     const lid=BABYLON.MeshBuilder.CreateCylinder(_uid('cyl'), {diameterTop:0.25*2, diameterBottom:0.25*2, height:0.5, tessellation:10, arc:0.5}, _scene);
     const lidMat = mkStdMat(_uid('mat'), _scene); lidMat.diffuseColor = hexIntToColor3(c); lidMat.metadata = {roughness:0.9}; lidMat.backFaceCulling = false;
     lid.material = lidMat; lid.rotation.z=Math.PI/2; lid.position.set(0,0.35,0); lid.parent = g;
     const lock=mkBox(0.08,0.1,0.05,0xd0a020); lock.position.set(0,0.35,0.26); lock.parent = g; return g; }});
-registerAsset({ id:'prop_bed', cat:'props', label:'Lit', icon:'🛏️', color:0x8a8a90, size:[1.4,0.6,2],
+registerAsset({ id:'prop_bed', cat:'props', family:'Mobilier', label:'Lit', icon:'🛏️', color:0x8a8a90, size:[1.4,0.6,2],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const frame=mkBox(1.4,0.3,2,0x6b4a2e); frame.parent = g;
     const mattress=mkBox(1.3,0.2,1.9,0xe8e0d0); mattress.position.y=0.4; mattress.parent = g;
     const pillow=mkBox(0.5,0.12,0.35,0xffffff); pillow.position.set(0,0.55,-0.75); pillow.parent = g; return g; }});
-registerAsset({ id:'prop_fireplace', cat:'props', label:'Cheminée', icon:'🔥', color:0x7a776c, size:[1.2,1.8,0.6],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const body=mkBox(1.2,1.8,0.6,c); body.parent = g;
+registerAsset({ id:'prop_fireplace', cat:'props', family:'Éclairage & feu', label:'Cheminée', icon:'🔥', color:0x7a776c, size:[1.2,1.8,0.6],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const body=mkBox(1.2,1.8,0.6,c,{map:texStuc(c),repeatX:1.5,repeatY:2}); body.parent = g;
     const hearth=mkBox(0.9,0.15,0.5,0x2a2a2a); hearth.position.set(0,0.3,0.05); hearth.parent = g;
     const flame=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.18*2, height:0.4, tessellation:6}, _scene);
     const flameMat = mkStdMat(_uid('mat'), _scene);
     flameMat.diffuseColor = hexIntToColor3(0xff8a2a); flameMat.emissiveColor = hexIntToColor3(0xff5a1e).scale(0.9);
     flame.material = flameMat; flame.position.set(0,0.5,0.1); flame.parent = g; return g; }});
-registerAsset({ id:'prop_lamp', cat:'props', label:'Lampe', icon:'💡', color:0x2a2a2a, size:[0.3,1.6,0.3],
+registerAsset({ id:'prop_lamp', cat:'props', family:'Éclairage & feu', label:'Lampe', icon:'💡', color:0x2a2a2a, size:[0.3,1.6,0.3],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const pole=mkCyl(0.05,0.06,1.4,0x2a2a2a); pole.parent = g;
     const shade=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.22*2, height:0.3, tessellation:10}, _scene);
     const shadeMat = mkStdMat(_uid('mat'), _scene);
     shadeMat.diffuseColor = hexIntToColor3(0xf0e8c0); shadeMat.emissiveColor = hexIntToColor3(0xfff0b0).scale(0.6);
     shade.material = shadeMat; shade.position.y=1.5; shade.parent = g; return g; }});
-registerAsset({ id:'prop_lantern', cat:'props', label:'Lanterne', icon:'🏮', color:0xb03a2a, size:[0.4,0.6,0.4],
+registerAsset({ id:'prop_lantern', cat:'props', family:'Éclairage & feu', label:'Lanterne', icon:'🏮', color:0xb03a2a, size:[0.4,0.6,0.4],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const body=mkCyl(0.18,0.18,0.4,0xb03a2a,10);
     body.material.emissiveColor=hexIntToColor3(0xff6a2a).scale(0.5); body.parent = g;
     const top=mkCyl(0.02,0.1,0.1,0x3a2a1e); top.position.y=0.25; top.parent = g; const bottom=mkCyl(0.1,0.02,0.1,0x3a2a1e); bottom.position.y=-0.25; bottom.parent = g; return g; }});
-registerAsset({ id:'prop_torch', cat:'props', label:'Torche', icon:'🔥', color:0x6b4a2e, size:[0.15,1.2,0.15],
+registerAsset({ id:'prop_torch', cat:'props', family:'Éclairage & feu', label:'Torche', icon:'🔥', color:0x6b4a2e, size:[0.15,1.2,0.15],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const stick=mkCyl(0.03,0.04,1,0x6b4a2e); stick.parent = g;
     const flame=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.09*2, height:0.22, tessellation:6}, _scene);
     const flameMat = mkStdMat(_uid('mat'), _scene);
     flameMat.diffuseColor = hexIntToColor3(0xff8a2a); flameMat.emissiveColor = hexIntToColor3(0xff5a1e).scale(0.9);
     flame.material = flameMat; flame.position.y=0.6; flame.parent = g; return g; }});
-registerAsset({ id:'prop_statue', cat:'props', label:'Statue', icon:'🗿', color:0xa8a29a, size:[0.8,2,0.6],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(0.9,0.3,0.7,c); base.parent = g;
-    const body=mkCyl(0.28,0.34,1.4,c,10); body.position.y=1; body.parent = g;
+registerAsset({ id:'prop_statue', cat:'props', family:'Monuments & décor', label:'Statue', icon:'🗿', color:0xa8a29a, size:[0.8,2,0.6],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(0.9,0.3,0.7,c,{map:texStuc(c),repeatX:1,repeatY:1}); base.parent = g;
+    const body=mkTexturedCyl(0.28,0.34,1.4,c,10,texStuc(c)); body.position.y=1; body.parent = g;
     const head=BABYLON.MeshBuilder.CreatePolyhedron(_uid('poly'), {type:3, size:0.24}, _scene);
     const headMat = mkStdMat(_uid('mat'), _scene); headMat.diffuseColor = hexIntToColor3(c);
     head.material = headMat; head.convertToFlatShadedMesh(); head.position.y=1.85; head.parent = g; return g; }});
-registerAsset({ id:'prop_statue_giant', cat:'props', label:'Statue géante', icon:'🗿', color:0x8a857a, size:[2,6,1.6],
-  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(2.2,0.6,1.8,c); base.parent = g;
-    const body=mkCyl(0.7,0.9,4,c,12); body.position.y=2.6; body.parent = g;
+registerAsset({ id:'prop_statue_giant', cat:'props', family:'Monuments & décor', label:'Statue géante', icon:'🗿', color:0x8a857a, size:[2,6,1.6],
+  build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(2.2,0.6,1.8,c,{map:texStuc(c),repeatX:2,repeatY:1}); base.parent = g;
+    const body=mkTexturedCyl(0.7,0.9,4,c,12,texStuc(c)); body.position.y=2.6; body.parent = g;
     const head=BABYLON.MeshBuilder.CreatePolyhedron(_uid('poly'), {type:3, size:0.6}, _scene);
     const headMat = mkStdMat(_uid('mat'), _scene); headMat.diffuseColor = hexIntToColor3(c);
     head.material = headMat; head.convertToFlatShadedMesh(); head.position.y=5; head.parent = g; return g; }});
-registerAsset({ id:'prop_sign', cat:'props', label:'Panneau', icon:'🪧', color:0x6b4a2e, size:[0.9,1.2,0.1],
+registerAsset({ id:'prop_sign', cat:'props', family:'Signalétique', label:'Panneau', icon:'🪧', color:0x6b4a2e, size:[0.9,1.2,0.1],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const post=mkCyl(0.05,0.06,1,0x6b4a2e); post.parent = g;
-    const board=mkBox(0.8,0.5,0.05,0xd8c8a0); board.position.y=1.05; board.parent = g; return g; }});
-registerAsset({ id:'prop_dirsign', cat:'props', label:'Panneau directionnel', icon:'➡️', color:0x6b4a2e, size:[1,1.4,0.1],
+    const board=mkBox(0.8,0.5,0.05,0xd8c8a0,{map:texWoodFloor(0xd8c8a0),repeatX:1,repeatY:1}); board.position.y=1.05; board.parent = g; return g; }});
+registerAsset({ id:'prop_dirsign', cat:'props', family:'Signalétique', label:'Panneau directionnel', icon:'➡️', color:0x6b4a2e, size:[1,1.4,0.1],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const post=mkCyl(0.05,0.06,1.3,0x6b4a2e); post.parent = g;
-    const arrow1=mkBox(0.6,0.2,0.04,0xd8c8a0); arrow1.position.set(0.2,1.1,0); arrow1.parent = g;
-    const arrow2=mkBox(0.5,0.2,0.04,0xd8c8a0); arrow2.position.set(-0.15,0.85,0); arrow2.rotation.z=0.3; arrow2.parent = g; return g; }});
-registerAsset({ id:'prop_flag', cat:'props', label:'Drapeau', icon:'🚩', color:0xd8384a, size:[0.6,1.8,0.05],
+    const arrow1=mkBox(0.6,0.2,0.04,0xd8c8a0,{map:texWoodFloor(0xd8c8a0),repeatX:1,repeatY:1}); arrow1.position.set(0.2,1.1,0); arrow1.parent = g;
+    const arrow2=mkBox(0.5,0.2,0.04,0xd8c8a0,{map:texWoodFloor(0xd8c8a0),repeatX:1,repeatY:1}); arrow2.position.set(-0.15,0.85,0); arrow2.rotation.z=0.3; arrow2.parent = g; return g; }});
+registerAsset({ id:'prop_flag', cat:'props', family:'Signalétique', label:'Drapeau', icon:'🚩', color:0xd8384a, size:[0.6,1.8,0.05],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const pole=mkCyl(0.03,0.04,1.8,0x2a2a2a); pole.parent = g;
     const cloth=mkBox(0.5,0.35,0.03,0xd8384a); cloth.position.set(0.28,0.75,0); cloth.parent = g; return g; }});
-registerAsset({ id:'prop_banner', cat:'props', label:'Bannière', icon:'🎏', color:0x3a5cb0, size:[0.5,2,0.05],
+registerAsset({ id:'prop_banner', cat:'props', family:'Signalétique', label:'Bannière', icon:'🎏', color:0x3a5cb0, size:[0.5,2,0.05],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const cloth=mkBox(0.5,1.8,0.04,0x3a5cb0); cloth.parent = g;
     const emblem=BABYLON.MeshBuilder.CreateDisc(_uid('disc'), {radius:0.14, tessellation:10}, _scene);
     const emblemMat = mkStdMat(_uid('mat'), _scene); emblemMat.diffuseColor = hexIntToColor3(0xf0c020);
     emblem.material = emblemMat; emblem.position.set(0,0.4,0.03); emblem.parent = g; return g; }});
-registerAsset({ id:'prop_clock', cat:'props', label:'Horloge', icon:'🕐', color:0x3a2a1e, size:[0.6,0.6,0.15],
+registerAsset({ id:'prop_clock', cat:'props', family:'Monuments & décor', label:'Horloge', icon:'🕐', color:0x3a2a1e, size:[0.6,0.6,0.15],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const face=mkCyl(0.3,0.3,0.08,0xe8e0d0,16); face.rotation.z=Math.PI/2; face.parent = g;
     const rim=BABYLON.MeshBuilder.CreateTorus(_uid('torus'), {diameter:0.3*2, thickness:0.03*2, tessellation:16}, _scene);
     const rimMat = mkStdMat(_uid('mat'), _scene); rimMat.diffuseColor = hexIntToColor3(0x3a2a1e);
     rim.material = rimMat; rim.rotation.y=Math.PI/2; rim.parent = g; return g; }});
-registerAsset({ id:'prop_bell', cat:'props', label:'Cloche', icon:'🔔', color:0xc0a030, size:[0.5,0.6,0.5],
+registerAsset({ id:'prop_bell', cat:'props', family:'Monuments & décor', label:'Cloche', icon:'🔔', color:0xc0a030, size:[0.5,0.6,0.5],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene);
     const bell=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.28*2, height:0.4, tessellation:10, arc:1}, _scene);
     const bellMat = mkStdMat(_uid('mat'), _scene); bellMat.diffuseColor = hexIntToColor3(c); bellMat.metadata = {metalness:0.7, roughness:0.3}; bellMat.backFaceCulling = false;
@@ -4208,25 +4486,25 @@ registerAsset({ id:'prop_bell', cat:'props', label:'Cloche', icon:'🔔', color:
     const clapper=BABYLON.MeshBuilder.CreateSphere(_uid('sphere'), {diameter:0.05*2, segments:6}, _scene);
     const clapperMat = mkStdMat(_uid('mat'), _scene); clapperMat.diffuseColor = hexIntToColor3(0x3a2a1e);
     clapper.material = clapperMat; clapper.position.y=0.08; clapper.parent = g; return g; }});
-registerAsset({ id:'prop_flowerpot', cat:'props', label:'Pot de fleurs', icon:'🪴', color:0xb0623a, size:[0.4,0.5,0.4],
+registerAsset({ id:'prop_flowerpot', cat:'props', family:'Divers', label:'Pot de fleurs', icon:'🪴', color:0xb0623a, size:[0.4,0.5,0.4],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const pot=mkCyl(0.16,0.2,0.28,0xb0623a,10); pot.parent = g;
     const plant=BABYLON.MeshBuilder.CreatePolyhedron(_uid('poly'), {type:3, size:0.16}, _scene);
     const plantMat = mkStdMat(_uid('mat'), _scene); plantMat.diffuseColor = hexIntToColor3(0x4f7a3a);
     plant.material = plantMat; plant.convertToFlatShadedMesh(); plant.position.y=0.35; plant.parent = g; return g; }});
-registerAsset({ id:'prop_decofountain', cat:'props', label:'Fontaine décorative', icon:'⛲', color:0xc9c0a8, size:[1.6,1.4,1.6],
+registerAsset({ id:'prop_decofountain', cat:'props', family:'Monuments & décor', label:'Fontaine décorative', icon:'⛲', color:0xc9c0a8, size:[1.6,1.4,1.6],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const basin=mkCyl(0.75,0.8,0.3,c,16); basin.parent = g;
     const water=BABYLON.MeshBuilder.CreateDisc(_uid('disc'), {radius:0.65, tessellation:16}, _scene);
-    const waterMat = mkStdMat(_uid('mat'), _scene); waterMat.diffuseColor = hexIntToColor3(0x2f6f8f); waterMat.alpha = 0.8;
-    water.material = waterMat; water.rotation.x=-Math.PI/2; water.position.y=0.31; water.parent = g;
+    water.material = mkWaterMat(0x2f6f8f, 0.8);
+    water.rotation.x=-Math.PI/2; water.position.y=0.31; water.parent = g;
     const pedestal=mkCyl(0.14,0.18,0.9,c,10); pedestal.position.y=0.3; pedestal.parent = g; return g; }});
-registerAsset({ id:'prop_cart', cat:'props', label:'Chariot', icon:'🛒', color:0x6b4a2e, size:[1.4,0.9,0.9],
+registerAsset({ id:'prop_cart', cat:'props', family:'Divers', label:'Chariot', icon:'🛒', color:0x6b4a2e, size:[1.4,0.9,0.9],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const bed=mkBox(1.4,0.4,0.9,c); bed.position.y=0.5; bed.parent = g;
     for(const x of [-0.5,0.5]){
       const wheel=BABYLON.MeshBuilder.CreateTorus(_uid('torus'), {diameter:0.28*2, thickness:0.06*2, tessellation:14}, _scene);
       const wheelMat = mkStdMat(_uid('mat'), _scene); wheelMat.diffuseColor = hexIntToColor3(0x3a2a1e);
       wheel.material = wheelMat; wheel.rotation.y=Math.PI/2; wheel.position.set(x,0.28,0.5); wheel.parent = g;}
     return g; }});
-registerAsset({ id:'prop_brokenwheel', cat:'props', label:'Roue cassée', icon:'☸️', color:0x5c4530, size:[0.7,0.15,0.7],
+registerAsset({ id:'prop_brokenwheel', cat:'props', family:'Divers', label:'Roue cassée', icon:'☸️', color:0x5c4530, size:[0.7,0.15,0.7],
   build:(c)=>{
     const wheel=BABYLON.MeshBuilder.CreateTorus(_uid('torus'), {diameter:0.32*2, thickness:0.05*2, tessellation:12, arc:0.75}, _scene);
     const wheelMat = mkStdMat(_uid('mat'), _scene); wheelMat.diffuseColor = hexIntToColor3(c); wheelMat.metadata = {roughness:0.9}; wheelMat.backFaceCulling = false;
@@ -4241,10 +4519,84 @@ registerAsset({ id:'prop_brokenwheel', cat:'props', label:'Roue cassée', icon:'
       spoke.material = spokeMat;
       const ang=(i/3)*Math.PI*2+0.3; spoke.position.set(Math.sin(ang)*spokeLen*0.5,0,Math.cos(ang)*spokeLen*0.5); spoke.rotation.z=-ang; spoke.metadata = {castShadow:false}; spoke.parent = hub; }
     return group(wheel); }});
-registerAsset({ id:'prop_cage', cat:'props', label:'Cage', icon:'🔒', color:0x3a3a3a, size:[0.8,1.2,0.8],
+registerAsset({ id:'prop_cage', cat:'props', family:'Rangement', label:'Cage', icon:'🔒', color:0x3a3a3a, size:[0.8,1.2,0.8],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); for(let i=0;i<8;i++){ const bar=mkCyl(0.02,0.02,1.1,c,6); const ang=i/8*Math.PI*2; bar.position.set(Math.cos(ang)*0.36,0.55,Math.sin(ang)*0.36); bar.parent = g;}
     const top=mkCyl(0.38,0.38,0.03,c,12); top.position.y=1.1; top.parent = g; const bottom=mkCyl(0.38,0.38,0.03,c,12); bottom.position.y=0.02; bottom.parent = g; return g; }});
-registerAsset({ id:'prop_throne', cat:'props', label:'Trône', icon:'👑', color:0xc0a030, size:[1,2,1],
+// Casier métallique — mobilier "moderne" absent jusqu'ici (Rangement
+// n'avait que du thème médiéval/rustique : tonneau, caisse, coffre).
+registerAsset({ id:'prop_locker', cat:'props', family:'Rangement', label:'Casier', icon:'🗄️', color:0x4a5560, size:[0.5,1.8,0.5],
+  build:(c)=>{
+    const g = group(mkBox(0.5,1.8,0.5,c,{metalness:0.35,roughness:0.55}));
+    const door = mkBox(0.42,1.7,0.02,shade(c,0.85)); door.position.set(0,0,0.26); door.parent = g;
+    const vent = mkBox(0.3,0.15,0.03,0x2a2e33); vent.position.set(0,0.7,0.28); vent.metadata={castShadow:false}; vent.parent = g;
+    const handle = mkCyl(0.015,0.015,0.14,0xc9c9c9,6); handle.rotation.z=Math.PI/2; handle.position.set(0.15,-0.1,0.28); handle.metadata={castShadow:false}; handle.parent = g;
+    return g; }});
+// Poubelle urbaine — distincte de la benne (cover_dumpster) : petit
+// format, mobilier de rue plutôt que couverture de combat.
+registerAsset({ id:'prop_trashcan', cat:'props', family:'Divers', label:'Poubelle', icon:'🗑️', color:0x5c6470, size:[0.4,0.65,0.4],
+  build:(c)=>{
+    const g = group(mkCyl(0.2,0.18,0.6,c,10));
+    const rim = mkCyl(0.22,0.22,0.04,shade(c,0.7),10); rim.position.y=0.32; rim.metadata={castShadow:false}; rim.parent = g;
+    return g; }});
+// Groupe électrogène — premier prop "technique/industriel" du catalogue,
+// utile en couverture basse dans les biomes ville/usine.
+registerAsset({ id:'prop_generator', cat:'props', family:'Tech & urbain', label:'Groupe électrogène', icon:'⚡', color:0x5c6055, size:[0.9,0.8,0.6],
+  build:(c)=>{
+    const g = group(mkBox(0.9,0.8,0.6,c,{metalness:0.3,roughness:0.6}));
+    for(let i=0;i<3;i++){ const vent = mkBox(0.7,0.03,0.03,0x2a2e33); vent.position.set(0,0.15+i*0.12,0.31); vent.metadata={castShadow:false}; vent.parent=g; }
+    const pipe = mkCyl(0.04,0.04,0.35,0x8a8f94,8); pipe.position.set(0.3,0.6,-0.2); pipe.metadata={castShadow:true}; pipe.parent = g;
+    const warnMat = mkStdMat(_uid('genWarnMat'), _scene); warnMat.diffuseColor = hexIntToColor3(0xe0c020); warnMat.emissiveColor = hexIntToColor3(0xe0c020).scale(0.25);
+    const warn = mkBox(0.25,0.15,0.02,0xe0c020); warn.material = warnMat; warn.position.set(0,0.35,0.31); warn.metadata={castShadow:false}; warn.parent = g;
+    return g; }});
+// Distributeur automatique — accroche visuelle "ville moderne" qui
+// manquait totalement au catalogue (rien entre le mobilier rustique et
+// les structures/bâtiments entiers).
+registerAsset({ id:'prop_vending_machine', cat:'props', family:'Tech & urbain', label:'Distributeur', icon:'🥤', color:0xc0392b, size:[0.7,1.8,0.6],
+  build:(c)=>{
+    const g = group(mkBox(0.7,1.8,0.6,c,{roughness:0.4,metalness:0.15}));
+    const glassMat = mkStdMat(_uid('vendGlassMat'), _scene);
+    glassMat.diffuseColor = hexIntToColor3(0x1a2a2e); glassMat.emissiveColor = hexIntToColor3(0x3ec9c9).scale(0.18); glassMat.metadata={roughness:0.15,metalness:0.1};
+    const glass = mkBox(0.5,1.1,0.02,0x1a2a2e); glass.material = glassMat; glass.position.set(0,0.15,0.31); glass.parent = g;
+    for(let row=0; row<3; row++){ for(let col=0; col<2; col++){
+      const can = mkCyl(0.05,0.05,0.16,[0xe0c020,0xffffff,0x3ec9c9][(row+col)%3],10);
+      can.position.set(-0.11+col*0.22, 0.55-row*0.35, 0.3); can.metadata={castShadow:false}; can.parent = g;
+    }}
+    const panel = mkBox(0.5,0.3,0.02,shade(c,0.8)); panel.position.set(0,0.85,0.31); panel.metadata={castShadow:false}; panel.parent = g;
+    return g; }});
+// Lampadaire — la seule lumière déjà présente (prop_lamp) est un modèle
+// bas façon intérieur/campement, jamais un vrai mât de rue urbain (bras
+// en crosse, tête projetée vers la chaussée).
+registerAsset({ id:'prop_streetlamp', cat:'props', family:'Éclairage & feu', label:'Lampadaire', icon:'💡', color:0x2a2a2a, size:[0.9,4.2,0.3],
+  build:()=>{
+    const g = new BABYLON.TransformNode(_uid('streetlampGrp'), _scene);
+    const pole = mkCyl(0.06,0.08,4,0x2a2a2a,10); pole.position.y=2; pole.parent = g;
+    const arm = mkCyl(0.04,0.05,0.7,0x2a2a2a,8); arm.rotation.z=Math.PI/2.3; arm.position.set(0.32,3.85,0); arm.parent = g;
+    const headMat = mkStdMat(_uid('streetlampHeadMat'), _scene);
+    headMat.diffuseColor = hexIntToColor3(0xf0e8c0); headMat.emissiveColor = hexIntToColor3(0xfff0b0).scale(0.7); headMat.metadata={roughness:0.3};
+    const head = BABYLON.MeshBuilder.CreateCylinder(_uid('streetlampHead'), {diameterTop:0.05,diameterBottom:0.3,height:0.22,tessellation:10}, _scene);
+    head.material = headMat; head.position.set(0.62,3.68,0); head.metadata={castShadow:false}; head.parent = g;
+    return g; }});
+registerAsset({ id:'prop_mailbox', cat:'props', family:'Divers', label:'Boîte aux lettres', icon:'📮', color:0x3a5aa0, size:[0.3,1.1,0.3],
+  build:(c)=>{
+    const g = new BABYLON.TransformNode(_uid('mailboxGrp'), _scene);
+    const post = mkCyl(0.03,0.03,0.8,0x2a2a2a); post.parent = g;
+    const box = BABYLON.MeshBuilder.CreateCylinder(_uid('mailboxBox'), {diameterTop:0.22,diameterBottom:0.22,height:0.4,tessellation:10,arc:0.5}, _scene);
+    const boxMat = mkStdMat(_uid('mailboxBoxMat'), _scene); boxMat.diffuseColor = hexIntToColor3(c); boxMat.metadata={roughness:0.5,metalness:0.2}; boxMat.backFaceCulling=false;
+    box.material = boxMat; box.rotation.z=Math.PI/2; box.position.y=0.95; box.metadata={castShadow:true}; box.parent = g;
+    const flap = mkBox(0.22,0.22,0.01,shade(c,0.85)); flap.position.set(0,0.95,0.11); flap.metadata={castShadow:false}; flap.parent = g;
+    return g; }});
+// Distributeur bancaire — accroche "ville moderne" du même esprit que
+// prop_vending_machine, écran/clavier au lieu de vitrine réfrigérée.
+registerAsset({ id:'prop_atm', cat:'props', family:'Tech & urbain', label:'Distributeur bancaire', icon:'🏧', color:0x3a3d40, size:[0.55,1.4,0.4],
+  build:(c)=>{
+    const g = group(mkBox(0.55,1.4,0.4,c,{metalness:0.3,roughness:0.4}));
+    const screenMat = mkStdMat(_uid('atmScreenMat'), _scene);
+    screenMat.diffuseColor = hexIntToColor3(0x1a2a3a); screenMat.emissiveColor = hexIntToColor3(0x3ec9c9).scale(0.35); screenMat.metadata={roughness:0.2};
+    const screen = mkBox(0.32,0.22,0.02,0x1a2a3a); screen.material = screenMat; screen.position.set(0,0.35,0.21); screen.metadata={castShadow:false}; screen.parent = g;
+    const slot = mkBox(0.3,0.03,0.02,0x0a0a0a); slot.position.set(0,0.1,0.21); slot.metadata={castShadow:false}; slot.parent = g;
+    const keypad = mkBox(0.18,0.15,0.02,0x2a2a2a); keypad.position.set(0,-0.15,0.21); keypad.metadata={castShadow:false}; keypad.parent = g;
+    return g; }});
+registerAsset({ id:'prop_throne', cat:'props', family:'Mobilier', label:'Trône', icon:'👑', color:0xc0a030, size:[1,2,1],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const seat=mkBox(0.8,0.15,0.8,c); seat.position.y=0.6; seat.parent = g;
     const back=mkBox(0.8,1.4,0.15,c); back.position.set(0,1.1,-0.35); back.parent = g;
     for(const [x,z] of [[-0.35,-0.35],[0.35,-0.35],[-0.35,0.35],[0.35,0.35]]){ const leg=mkBox(0.1,0.6,0.1,c); leg.position.set(x,0.3,z); leg.parent = g;}
@@ -4252,13 +4604,13 @@ registerAsset({ id:'prop_throne', cat:'props', label:'Trône', icon:'👑', colo
     const gemMat = mkStdMat(_uid('mat'), _scene);
     gemMat.diffuseColor = hexIntToColor3(0xd8384a); gemMat.emissiveColor = hexIntToColor3(0x8a1a2a).scale(0.4);
     gem.material = gemMat; gem.position.set(0,1.7,-0.32); gem.parent = g; return g; }});
-registerAsset({ id:'prop_carpet', cat:'props', label:'Tapis', icon:'🟥', color:0x9a2a2a, size:[2,0.05,1.2],
+registerAsset({ id:'prop_carpet', cat:'props', family:'Mobilier', label:'Tapis', icon:'🟥', color:0x9a2a2a, size:[2,0.05,1.2],
   build:(c)=>{ const g = group(mkBox(2,0.03,1.2,c));
     const border = hexIntToColor3(c).scale(0.6);
     const inset = mkBox(1.7,0.032,0.9,border,{opacity:1}); inset.position.y=0.001; inset.metadata = {castShadow:false}; inset.parent = g;
     const center = mkBox(1.2,0.033,0.55,c); center.position.y=0.002; center.metadata = {castShadow:false}; center.parent = g;
     return g; }});
-registerAsset({ id:'prop_altar', cat:'props', label:'Autel', icon:'🕯️', color:0x8a8578, size:[1.4,1,0.8],
+registerAsset({ id:'prop_altar', cat:'props', family:'Monuments & décor', label:'Autel', icon:'🕯️', color:0x8a8578, size:[1.4,1,0.8],
   build:(c)=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); const base=mkBox(1.4,0.8,0.8,c); base.parent = g;
     const slab=mkBox(1.6,0.15,1,c); slab.position.y=0.47; slab.parent = g;
     for(const x of [-0.5,0.5]){ const candle=mkCyl(0.04,0.04,0.3,0xe8e0d0); candle.position.set(x,0.7,0); candle.parent = g;
@@ -4266,9 +4618,9 @@ registerAsset({ id:'prop_altar', cat:'props', label:'Autel', icon:'🕯️', col
       const flameMat = mkStdMat(_uid('mat'), _scene);
       flameMat.diffuseColor = hexIntToColor3(0xff8a2a); flameMat.emissiveColor = hexIntToColor3(0xff5a1e).scale(0.9);
       flame.material = flameMat; flame.position.set(x,0.9,0); flame.parent = g;} return g; }});
-registerAsset({ id:'prop_decocrystal', cat:'props', label:'Cristal décoratif', icon:'💎', color:0x8a4ad8, size:[0.5,0.8,0.5],
+registerAsset({ id:'prop_decocrystal', cat:'props', family:'Monuments & décor', label:'Cristal décoratif', icon:'💎', color:0x8a4ad8, size:[0.5,0.8,0.5],
   build:()=> buildCrystalAsset(0x8a4ad8, 0.8) });
-registerAsset({ id:'prop_campfire', cat:'props', label:'Feu de camp', icon:'🔥', color:0x4a3a2a, size:[0.8,0.6,0.8],
+registerAsset({ id:'prop_campfire', cat:'props', family:'Éclairage & feu', label:'Feu de camp', icon:'🔥', color:0x4a3a2a, size:[0.8,0.6,0.8],
   build:()=>{ const g=new BABYLON.TransformNode(_uid('grp'), _scene); for(let i=0;i<5;i++){ const log=mkCyl(0.05,0.06,0.6,0x4a3a2a,6); log.rotation.z=Math.PI/2; log.rotation.y=i/5*Math.PI; log.position.y=0.06; log.parent = g;}
     const flame=BABYLON.MeshBuilder.CreateCylinder(_uid('cone'), {diameterTop:0, diameterBottom:0.2*2, height:0.5, tessellation:8}, _scene);
     const flameMat = mkStdMat(_uid('mat'), _scene);
@@ -4281,27 +4633,41 @@ registerAsset({ id:'prop_campfire', cat:'props', label:'Feu de camp', icon:'🔥
 
 
 // ---- ÉLÉMENTS TACTIQUES ----
-registerAsset({ id:'tac_headshot', cat:'tactical', label:'Caisse headshot', icon:'🎯', color:0x8a6a3f, size:[1.2,0.9,1.2],
+registerAsset({ id:'tac_headshot', cat:'tactical', family:'Couverture de tir', label:'Caisse headshot', icon:'🎯', color:0x8a6a3f, size:[1.2,0.9,1.2],
   build:(c)=> mkBox(1.2,0.9,1.2,c) });
-registerAsset({ id:'tac_half', cat:'tactical', label:'Half cover', icon:'◐', color:0x8a6a3f, size:[1.6,1.3,1.4],
+registerAsset({ id:'tac_half', cat:'tactical', family:'Couverture de tir', label:'Half cover', icon:'◐', color:0x8a6a3f, size:[1.6,1.3,1.4],
   build:(c)=> mkBox(1.6,1.3,1.4,c) });
-registerAsset({ id:'tac_full', cat:'tactical', label:'Full cover', icon:'◼', color:0x8a6a3f, size:[1.8,2.2,1.4],
+registerAsset({ id:'tac_full', cat:'tactical', family:'Couverture de tir', label:'Full cover', icon:'◼', color:0x8a6a3f, size:[1.8,2.2,1.4],
   build:(c)=> mkBox(1.8,2.2,1.4,c) });
-registerAsset({ id:'tac_peek', cat:'tactical', label:'Angle de peek', icon:'◣', color:0x9a8a6a, size:[2,2.4,0.4],
+registerAsset({ id:'tac_peek', cat:'tactical', family:'Couverture de tir', label:'Angle de peek', icon:'◣', color:0x9a8a6a, size:[2,2.4,0.4],
   build:(c)=>{ const w = mkBox(2,2.4,0.4,c); w.rotation.y = 0.5; return w; }});
-registerAsset({ id:'tac_divider', cat:'tactical', label:'Mur de séparation', icon:'❘', color:0x9a8a6a, size:[0.3,2.4,3],
+registerAsset({ id:'tac_divider', cat:'tactical', family:'Couverture de tir', label:'Mur de séparation', icon:'❘', color:0x9a8a6a, size:[0.3,2.4,3],
   build:(c)=> mkBox(0.3,2.4,3,c) });
-registerAsset({ id:'tac_door', cat:'tactical', label:'Porte', icon:'🚪', color:0x5a4530, size:[1.2,2.4,0.15],
+registerAsset({ id:'tac_door', cat:'tactical', family:'Ouvertures', label:'Porte', icon:'🚪', color:0x5a4530, size:[1.2,2.4,0.15],
   build:(c)=> mkBox(1.2,2.4,0.15,c) });
-registerAsset({ id:'tac_window', cat:'tactical', label:'Fenêtre', icon:'🪟', color:0x9db9c9, size:[1.4,1.2,0.1],
+registerAsset({ id:'tac_window', cat:'tactical', family:'Ouvertures', label:'Fenêtre', icon:'🪟', color:0x9db9c9, size:[1.4,1.2,0.1],
   build:(c)=> mkBox(1.4,1.2,0.1,c,{opacity:0.5,metalness:0.1,roughness:0.1}) });
-registerAsset({ id:'tac_smokehole', cat:'tactical', label:'Smoke hole', icon:'◌', color:0x2a2a2a, size:[0.8,0.15,0.8],
+registerAsset({ id:'tac_smokehole', cat:'tactical', family:'Ouvertures', label:'Smoke hole', icon:'◌', color:0x2a2a2a, size:[0.8,0.15,0.8],
   build:(c)=> mkCyl(0.4,0.4,0.15,c,16) });
+// Trappe au sol — jusqu'ici la seule ouverture au sol du catalogue était
+// vert_hatch (accès vertical fonctionnel) ; celle-ci est le pendant
+// "repère tactique" (gonds visibles, poignée) posable en dalle de sol.
+registerAsset({ id:'tac_trapdoor', cat:'tactical', family:'Ouvertures', label:'Trappe', icon:'🚪', color:0x4a4038, size:[0.9,0.06,0.9],
+  build:(c)=>{
+    const g = group(mkBox(0.9,0.06,0.9,c,{metalness:0.25,roughness:0.6}));
+    for(const hz of [-0.4,0.4]){
+      const hinge = mkCyl(0.03,0.03,0.14,0x2a2a2a,8); hinge.rotation.z=Math.PI/2;
+      hinge.position.set(0,0.035,hz); hinge.metadata={castShadow:false}; hinge.parent=g;
+    }
+    const handle = mkCyl(0.02,0.02,0.18,0x2a2a2a,6); handle.rotation.x=Math.PI/2;
+    handle.position.set(0,0.035,0); handle.metadata={castShadow:false}; handle.parent=g;
+    return g;
+  }});
 // Panneau signalétique mural stylisé AAA : cadre biseauté en léger
 // surplomb (capte l'ombre de contact) + plaque interne bombée en léger
 // retrait, gradient doux + usure peinte aux coins, vis de fixation —
 // voir l'analyse "panneau mural blanc" du brief.
-registerAsset({ id:'tac_signage_panel', cat:'tactical', label:'Panneau signalétique (AAA)', icon:'🪧', color:0xeae6da, size:[0.62,0.62,0.09],
+registerAsset({ id:'tac_signage_panel', cat:'tactical', family:'Repères & signalétique', label:'Panneau signalétique (AAA)', icon:'🪧', color:0xeae6da, size:[0.62,0.62,0.09],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     const frameColor = 0x6b7178;
@@ -4326,7 +4692,7 @@ registerAsset({ id:'tac_signage_panel', cat:'tactical', label:'Panneau signalét
 // élément 3D porteur de lecture vue en plongée), joint sombre encaissé,
 // rainures antidérapantes, boulons de fixation — voir l'analyse "plaque
 // au sol" du brief.
-registerAsset({ id:'tac_floor_plaque', cat:'tactical', label:'Plaque au sol (AAA)', icon:'▧', color:0xb8b0a0, size:[1.0,0.07,1.0],
+registerAsset({ id:'tac_floor_plaque', cat:'tactical', family:'Repères & signalétique', label:'Plaque au sol (AAA)', icon:'▧', color:0xb8b0a0, size:[1.0,0.07,1.0],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     // joint périphérique sombre encaissé (base légèrement plus large, visible en liseré)
@@ -4348,35 +4714,35 @@ registerAsset({ id:'tac_floor_plaque', cat:'tactical', label:'Plaque au sol (AAA
     return g;
   }});
 
-registerAsset({ id:'tac_explosive_barrel', cat:'tactical', label:'Baril explosif', icon:'🛢️', color:0xc23a2a, size:[0.6,0.9,0.6],
+registerAsset({ id:'tac_explosive_barrel', cat:'tactical', family:'Props explosifs & tech', label:'Baril explosif', icon:'🛢️', color:0xc23a2a, size:[0.6,0.9,0.6],
   build:(c)=>{
     const g = group(mkCyl(0.3,0.3,0.85,c));
     const band = mkCyl(0.31,0.31,0.1,0x2a2a2a,16); band.position.y=0.15; band.parent = g;
     const skull = mkBox(0.22,0.22,0.02,0xf0d020); skull.position.set(0,0,0.31); skull.parent = g;
     return g;
   }});
-registerAsset({ id:'tac_ammo_crate', cat:'tactical', label:'Caisse de munitions', icon:'📦', color:0x5a6a4a, size:[0.7,0.45,0.5],
+registerAsset({ id:'tac_ammo_crate', cat:'tactical', family:'Props explosifs & tech', label:'Caisse de munitions', icon:'📦', color:0x5a6a4a, size:[0.7,0.45,0.5],
   build:(c)=>{
     const g = group(mkBox(0.7,0.4,0.5,c,{roughness:0.75}));
     const lid = mkBox(0.72,0.06,0.52,hexIntToColor3(c).scale(0.8),{roughness:0.7}); lid.position.y=0.23; lid.parent = g;
     for(const sx of [-0.28,0.28]){ const clasp = mkBox(0.06,0.08,0.03,0x2a2a2a); clasp.position.set(sx,0.2,0.26); clasp.parent = g; }
     return g;
   }});
-registerAsset({ id:'tac_ac_unit', cat:'tactical', label:'Générateur / climatiseur', icon:'⚙️', color:0x8a9098, size:[0.9,0.8,0.6],
+registerAsset({ id:'tac_ac_unit', cat:'tactical', family:'Props explosifs & tech', label:'Générateur / climatiseur', icon:'⚙️', color:0x8a9098, size:[0.9,0.8,0.6],
   build:(c)=>{
     const g = group(mkBox(0.9,0.75,0.6,c,{metalness:0.4,roughness:0.5}));
     for(let i=0;i<3;i++){ const vent = mkBox(0.7,0.03,0.02,0x3a3d42); vent.position.set(0,0.15+i*0.12,0.31); vent.parent = g; }
     const fan = mkCyl(0.16,0.16,0.05,0x2a2a2a,16); fan.rotation.x=Math.PI/2; fan.position.set(0,-0.1,0.32); fan.parent = g;
     return g;
   }});
-registerAsset({ id:'tac_team_banner', cat:'tactical', label:"Banderole d'équipe", icon:'🚩', color:0xd83a3a, size:[1.0,2.2,0.06],
+registerAsset({ id:'tac_team_banner', cat:'tactical', family:'Repères & signalétique', label:"Banderole d'équipe", icon:'🚩', color:0xd83a3a, size:[1.0,2.2,0.06],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     const pole = mkCyl(0.04,0.04,2.4,0x2a2a2a,8); pole.position.y=1.2; pole.parent = g;
     const banner = mkBox(1.0,1.6,0.03,c,{roughness:0.8}); banner.position.set(0.52,1.6,0); banner.parent = g;
     return g;
   }});
-registerAsset({ id:'tac_signal_cone', cat:'tactical', label:'Cône de signalisation', icon:'🔺', color:0xff7a1a, size:[0.35,0.5,0.35],
+registerAsset({ id:'tac_signal_cone', cat:'tactical', family:'Repères & signalétique', label:'Cône de signalisation', icon:'🔺', color:0xff7a1a, size:[0.35,0.5,0.35],
   build:(c)=>{
     // Pas de mk* pour un cône (mkCyl impose un rayon haut ET bas) — même
     // convention manuelle que mkBox/mkCyl : ombre portée + reçue,
@@ -4391,7 +4757,7 @@ registerAsset({ id:'tac_signal_cone', cat:'tactical', label:'Cône de signalisat
   }});
 
 // ---- VERTICALITÉ ----
-registerAsset({ id:'vert_stairs', cat:'vertical', label:'Escalier', icon:'🪜', color:0x8a8378, size:[1.6,2.4,3],
+registerAsset({ id:'vert_stairs', cat:'vertical', family:'Escaliers & rampes', label:'Escalier', icon:'🪜', color:0x8a8378, size:[1.6,2.4,3],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     const steps = 8;
@@ -4402,7 +4768,7 @@ registerAsset({ id:'vert_stairs', cat:'vertical', label:'Escalier', icon:'🪜',
     }
     return g;
   }});
-registerAsset({ id:'vert_ramp', cat:'vertical', label:'Rampe', icon:'📐', color:0x8a8378, size:[2,2,4.2],
+registerAsset({ id:'vert_ramp', cat:'vertical', family:'Escaliers & rampes', label:'Rampe', icon:'📐', color:0x8a8378, size:[2,2,4.2],
   build:(c)=>{ const r = mkBox(2,0.3,4.2,c); r.rotation.x = -0.45; r.position.y = 1;
     for(let i=0;i<5;i++){
       const strip=BABYLON.MeshBuilder.CreateBox(_uid('box'), {width:1.9,height:0.03,depth:0.12}, _scene);
@@ -4413,7 +4779,7 @@ registerAsset({ id:'vert_ramp', cat:'vertical', label:'Rampe', icon:'📐', colo
       const railMat = mkStdMat(_uid('mat'), _scene); railMat.diffuseColor = hexIntToColor3(0x3a3a3a); railMat.metadata = {metalness:0.4, roughness:0.5};
       rail.material = railMat; rail.position.set(sx,0.4,0); rail.metadata = {castShadow:false}; rail.parent = r; }
     return r; }});
-registerAsset({ id:'vert_ladder', cat:'vertical', label:'Échelle', icon:'🪛', color:0x3a3a3a, size:[0.6,3,0.15],
+registerAsset({ id:'vert_ladder', cat:'vertical', family:'Accès verticaux', label:'Échelle', icon:'🪛', color:0x3a3a3a, size:[0.6,3,0.15],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     const rail1 = mkBox(0.06,3,0.06,c); rail1.position.x=-0.25;
@@ -4422,7 +4788,7 @@ registerAsset({ id:'vert_ladder', cat:'vertical', label:'Échelle', icon:'🪛',
     for(let i=0;i<7;i++){ const rung = mkBox(0.56,0.05,0.05,c); rung.position.y = 0.3+i*0.4; rung.parent = g; }
     return g;
   }});
-registerAsset({ id:'vert_elevator', cat:'vertical', label:'Ascenseur', icon:'🛗', color:0x6a6a6a, size:[2,0.2,2],
+registerAsset({ id:'vert_elevator', cat:'vertical', family:'Accès verticaux', label:'Ascenseur', icon:'🛗', color:0x6a6a6a, size:[2,0.2,2],
   build:(c)=>{ const base = mkBox(2,0.2,2,c,{metalness:0.4});
     for(const [sx,sz] of [[-0.95,0],[0.95,0],[0,-0.95],[0,0.95]]){
       const post = mkBox(0.08,1,0.08,0x3a3a3a); post.position.set(sx,0.6,sz); post.metadata = {castShadow:false}; post.parent = base;
@@ -4436,9 +4802,26 @@ registerAsset({ id:'vert_elevator', cat:'vertical', label:'Ascenseur', icon:'�
     btnMat.diffuseColor = hexIntToColor3(0xf0c020); btnMat.emissiveColor = hexIntToColor3(0xf0c020).scale(0.6);
     btn.material = btnMat; btn.position.set(-0.95,0.5,0.99); btn.parent = base;
     return base; }});
-registerAsset({ id:'vert_rope', cat:'vertical', label:'Corde', icon:'🪢', color:0x8a6a3f, size:[0.08,4,0.08],
+registerAsset({ id:'vert_rope', cat:'vertical', family:'Accès verticaux', label:'Corde', icon:'🪢', color:0x8a6a3f, size:[0.08,4,0.08],
   build:(c)=> mkCyl(0.05,0.05,4,c,6) });
-registerAsset({ id:'vert_walkway', cat:'vertical', label:'Passerelle', icon:'🌉', color:0x5c6470, size:[1.6,0.15,5],
+// Tyrolienne — vert_rope n'était qu'une corde verticale (montée/descente
+// sur place) ; celle-ci couvre le déplacement diagonal poteau-à-poteau,
+// absent jusqu'ici de la catégorie Verticalité.
+registerAsset({ id:'vert_zipline', cat:'vertical', family:'Accès verticaux', label:'Tyrolienne', icon:'🪢', color:0x6b7078, size:[0.15,3.5,6],
+  build:(c)=>{
+    const g = new BABYLON.TransformNode(_uid('ziplineGrp'), _scene);
+    const postA = mkCyl(0.07,0.09,3.5,0x4a3a2a,8); postA.position.set(-2.9,1.75,0); postA.parent = g;
+    const postB = mkCyl(0.05,0.07,1.3,0x4a3a2a,8); postB.position.set(2.9,0.65,0); postB.parent = g;
+    const cable = mkCyl(0.02,0.02,1,c,5);
+    const dx=5.8, dy=3.5-1.3, len=Math.sqrt(dx*dx+dy*dy);
+    cable.scaling.y = len; cable.position.set(0,(3.5+1.3)/2,0);
+    cable.rotation.z = Math.PI/2 - Math.atan2(dy,dx);
+    cable.metadata = {castShadow:true};
+    cable.parent = g;
+    const pulley = mkBox(0.1,0.08,0.06,0x2a2a2a); pulley.position.set(0.6,3.5-0.6*(dy/dx),0); pulley.metadata={castShadow:false}; pulley.parent = g;
+    return g;
+  }});
+registerAsset({ id:'vert_walkway', cat:'vertical', family:'Plateformes & passerelles', label:'Passerelle', icon:'🌉', color:0x5c6470, size:[1.6,0.15,5],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     const deck = mkBox(1.6,0.15,5,c,{metalness:0.3}); deck.parent = g;
@@ -4446,14 +4829,14 @@ registerAsset({ id:'vert_walkway', cat:'vertical', label:'Passerelle', icon:'�
     const rail2 = mkBox(0.06,0.9,5,0x3a3a3a); rail2.position.set(0.77,0.9,0); rail2.parent = g;
     return g;
   }});
-registerAsset({ id:'vert_balcony', cat:'vertical', label:'Balcon', icon:'🏗️', color:0xb9ac8e, size:[3,0.2,1.6],
+registerAsset({ id:'vert_balcony', cat:'vertical', family:'Plateformes & passerelles', label:'Balcon', icon:'🏗️', color:0xb9ac8e, size:[3,0.2,1.6],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     const floor = mkBox(3,0.2,1.6,c); floor.parent = g;
     const rail = mkBox(3,0.8,0.08,0x3a3a3a); rail.position.set(0,0.8,0.76); rail.parent = g;
     return g;
   }});
-registerAsset({ id:'vert_access_ramp', cat:'vertical', label:"Rampe d'accès", icon:'📐', color:0x8a8a86, size:[4,1.5,3],
+registerAsset({ id:'vert_access_ramp', cat:'vertical', family:'Escaliers & rampes', label:"Rampe d'accès", icon:'📐', color:0x8a8a86, size:[4,1.5,3],
   build:(c)=>{
     // TODO-PORT: géométrie originale = THREE.Shape triangulaire (profil de
     // rampe) extrudée sur depth=3 (THREE.ExtrudeGeometry) puis pivotée de
@@ -4475,7 +4858,7 @@ registerAsset({ id:'vert_access_ramp', cat:'vertical', label:"Rampe d'accès", i
     const g = group(ramp);
     return g;
   }});
-registerAsset({ id:'vert_platform', cat:'vertical', label:'Plateforme surélevée', icon:'🔲', color:0x6b6f76, size:[3,1.2,3],
+registerAsset({ id:'vert_platform', cat:'vertical', family:'Plateformes & passerelles', label:'Plateforme surélevée', icon:'🔲', color:0x6b6f76, size:[3,1.2,3],
   build:(c)=>{
     const g = group(mkBox(3,0.2,3,c,{roughness:0.8}));
     for(const [sx,sz] of [[-1.3,-1.3],[1.3,-1.3],[-1.3,1.3],[1.3,1.3]]){
@@ -4483,14 +4866,14 @@ registerAsset({ id:'vert_platform', cat:'vertical', label:'Plateforme surélevé
     }
     return g;
   }});
-registerAsset({ id:'vert_hatch', cat:'vertical', label:'Trappe au sol', icon:'⬜', color:0x4a4f57, size:[1.2,0.08,1.2],
+registerAsset({ id:'vert_hatch', cat:'vertical', family:'Accès verticaux', label:'Trappe au sol', icon:'⬜', color:0x4a4f57, size:[1.2,0.08,1.2],
   build:(c)=>{
     const g = group(mkBox(1.2,0.06,1.2,c,{metalness:0.5,roughness:0.4}));
     for(let i=1;i<4;i++){ const seam = mkBox(1.15,0.01,0.02,0x2a2e33); seam.position.set(0,0.035,-0.6+i*0.3); seam.parent = g; }
     const handle = mkCyl(0.03,0.03,0.12,0x1a1a1a,8); handle.rotation.x=Math.PI/2; handle.position.set(0,0.08,0.4); handle.parent = g;
     return g;
   }});
-registerAsset({ id:'vert_watchtower', cat:'vertical', label:"Tour d'observation", icon:'🗼', color:0x6b5a3f, size:[2,4.5,2],
+registerAsset({ id:'vert_watchtower', cat:'vertical', family:'Plateformes & passerelles', label:"Tour d'observation", icon:'🗼', color:0x6b5a3f, size:[2,4.5,2],
   build:(c)=>{
     const g = new BABYLON.TransformNode(_uid('grp'), _scene);
     for(const [sx,sz] of [[-0.85,-0.85],[0.85,-0.85],[-0.85,0.85],[0.85,0.85]]){
@@ -4968,39 +5351,45 @@ function mkFloorTile(size, color, pattern, tex){
   }
   return g;
 }
-registerAsset({ id:'floor_concrete', cat:'floors', label:'Sol béton', icon:'◻️', color:0x6e6e6a, size:[4,0.15,4],
+registerAsset({ id:'floor_concrete', cat:'floors', family:'Dur & urbain', label:'Sol béton', icon:'◻️', color:0x6e6e6a, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'seams',texConcrete(c)) });
-registerAsset({ id:'floor_snow', cat:'floors', label:'Sol neige', icon:'⬜', color:0xf2f5f8, size:[4,0.15,4],
+registerAsset({ id:'floor_snow', cat:'floors', family:'Neige & glace', label:'Sol neige', icon:'⬜', color:0xf2f5f8, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'snow',texSnowFloor(c)) });
-registerAsset({ id:'floor_ice', cat:'floors', label:'Sol glace', icon:'🧊', color:0xbfe0e8, size:[4,0.15,4],
+registerAsset({ id:'floor_ice', cat:'floors', family:'Neige & glace', label:'Sol glace', icon:'🧊', color:0xbfe0e8, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'ice',texIceFloor(c)) });
-registerAsset({ id:'floor_pave', cat:'floors', label:'Sol pavé', icon:'🧱', color:0x9a978d, size:[4,0.15,4],
+registerAsset({ id:'floor_pave', cat:'floors', family:'Dur & urbain', label:'Sol pavé', icon:'🧱', color:0x9a978d, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'pave',texPaveFloor(c)) });
-registerAsset({ id:'floor_wood', cat:'floors', label:'Sol bois', icon:'🟫', color:0x8a6a3f, size:[4,0.15,4],
+registerAsset({ id:'floor_wood', cat:'floors', family:'Naturel', label:'Sol bois', icon:'🟫', color:0x8a6a3f, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'planks',texWoodFloor(c)) });
-registerAsset({ id:'floor_metal', cat:'floors', label:'Caillebotis', icon:'▦', color:0x5c6470, size:[4,0.15,4],
+registerAsset({ id:'floor_metal', cat:'floors', family:'Dur & urbain', label:'Caillebotis', icon:'▦', color:0x5c6470, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'grate',texMetalFloor(c)) });
-registerAsset({ id:'floor_grass', cat:'floors', label:'Sol herbe', icon:'🟩', color:0x4f7a3a, size:[4,0.15,4],
+registerAsset({ id:'floor_grass', cat:'floors', family:'Naturel', label:'Sol herbe', icon:'🟩', color:0x4f7a3a, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'grass',texGrassFloor(c)) });
-registerAsset({ id:'floor_sand', cat:'floors', label:'Sable de plage', icon:'🟨', color:0xd4b485, size:[4,0.15,4],
+registerAsset({ id:'floor_sand', cat:'floors', family:'Sable', label:'Sable de plage', icon:'🟨', color:0xd4b485, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'ripples',texSandFloor(c)) });
-registerAsset({ id:'floor_sand_desert', cat:'floors', label:'Sable du désert', icon:'🏜️', color:0xd9a35c, size:[4,0.15,4],
+registerAsset({ id:'floor_sand_desert', cat:'floors', family:'Sable', label:'Sable du désert', icon:'🏜️', color:0xd9a35c, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'dunes',texDesertSandFloor(c)) });
-registerAsset({ id:'floor_sand_fine', cat:'floors', label:'Sable fin clair', icon:'⬜', color:0xe6d9b8, size:[4,0.15,4],
+registerAsset({ id:'floor_sand_fine', cat:'floors', family:'Sable', label:'Sable fin clair', icon:'⬜', color:0xe6d9b8, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'finesand',texFineSandFloor(c)) });
-registerAsset({ id:'floor_sand_rocky', cat:'floors', label:'Sable rocailleux', icon:'🪨', color:0xb8a988, size:[4,0.15,4],
+registerAsset({ id:'floor_sand_rocky', cat:'floors', family:'Sable', label:'Sable rocailleux', icon:'🪨', color:0xb8a988, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'rockysand',texRockySandFloor(c)) });
-registerAsset({ id:'floor_tile', cat:'floors', label:'Carrelage', icon:'⬜', color:0xc9c2b0, size:[4,0.15,4],
+registerAsset({ id:'floor_tile', cat:'floors', family:'Dur & urbain', label:'Carrelage', icon:'⬜', color:0xc9c2b0, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'tile',texTileFloor(c)) });
 // ---- Sols "terre" (mode terre) ----
-registerAsset({ id:'floor_dirt', cat:'floors', label:'Sol terre battue', icon:'🟤', color:0x7a5c3e, size:[4,0.15,4],
+registerAsset({ id:'floor_dirt', cat:'floors', family:'Terre', label:'Sol terre battue', icon:'🟤', color:0x7a5c3e, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'dirt',texDirtFloor(c)) });
-registerAsset({ id:'floor_mud', cat:'floors', label:'Sol boueux', icon:'🟫', color:0x4a3b28, size:[4,0.15,4],
+registerAsset({ id:'floor_mud', cat:'floors', family:'Terre', label:'Sol boueux', icon:'🟫', color:0x4a3b28, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'mud',texMudFloor(c)) });
-registerAsset({ id:'floor_cracked_earth', cat:'floors', label:'Terre craquelée', icon:'🟠', color:0xc79a5f, size:[4,0.15,4],
+registerAsset({ id:'floor_cracked_earth', cat:'floors', family:'Terre', label:'Terre craquelée', icon:'🟠', color:0xc79a5f, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'crackedearth',texCrackedEarthFloor(c)) });
-registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', icon:'🟥', color:0x8a6b46, size:[4,0.15,4],
+registerAsset({ id:'floor_gravel_dirt', cat:'floors', family:'Terre', label:'Chemin de terre', icon:'🟥', color:0x8a6b46, size:[4,0.15,4],
   build:(c)=> mkFloorTile(4,c,'graveldirt',texGravelDirtFloor(c)) });
+registerAsset({ id:'floor_marble', cat:'floors', family:'Dur & urbain', label:'Sol marbre', icon:'⬜', color:0xe6e0d4, size:[4,0.15,4],
+  build:(c)=> mkFloorTile(4,c,'tile',texMarble(c)) });
+registerAsset({ id:'floor_asphalt', cat:'floors', family:'Dur & urbain', label:'Bitume', icon:'⬛', color:0x2e2e30, size:[4,0.15,4],
+  build:(c)=> mkFloorTile(4,c,'seams',texAsphaltFloor(c)) });
+registerAsset({ id:'floor_moss', cat:'floors', family:'Naturel', label:'Sol moussu', icon:'🟢', color:0x5a7a3e, size:[4,0.15,4],
+  build:(c)=> mkFloorTile(4,c,'moss',texMossFloor(c)) });
 
 
   /* ============================================================
@@ -5325,6 +5714,76 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
       return wrapCanvasTexture('leafy_'+baseHex, cv);
     });
   }
+  // Feuilles individuelles DÉCOUPÉES (alpha réel, pas juste un mouchetis
+  // opaque comme texLeafy) — pour les cartes de feuillage (mkLeafCard) qui
+  // cassent la silhouette trop parfaite d'une sphère pleine. Fond du
+  // canvas laissé transparent (jamais rempli) : les trous entre feuilles
+  // doivent être un vrai alpha=0, découpé au rendu (alpha test), pas une
+  // ombre peinte comme sur texLeafy.
+  function texLeafCluster(baseHex){
+    return cachedTexture('leafcluster_'+baseHex, ()=>{
+      const cv = document.createElement('canvas'); cv.width=cv.height=256;
+      const ctx = cv.getContext('2d');
+      const base = hexIntToColor3(baseHex);
+      for(let i=0;i<13;i++){
+        const leaf = hueJitter(base, 0.05, 0.2, 0.16);
+        const cx = 26+Math.random()*204, cy = 26+Math.random()*204;
+        const rw = 20+Math.random()*22, rh = rw*(1.25+Math.random()*0.45);
+        const ang = Math.random()*Math.PI;
+        ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
+        ctx.globalAlpha = 0.88+Math.random()*0.12;
+        ctx.fillStyle = leaf.toHexString();
+        ctx.beginPath(); ctx.ellipse(0,0,rw*0.5,rh*0.5,0,0,Math.PI*2); ctx.fill();
+        // nervure centrale, casse l'aspect "tache" d'une simple ellipse
+        ctx.globalAlpha = 0.3;
+        ctx.strokeStyle = leaf.scale(0.55).toHexString(); ctx.lineWidth = 1.1;
+        ctx.beginPath(); ctx.moveTo(0,-rh*0.42); ctx.lineTo(0,rh*0.42); ctx.stroke();
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+      const tex = wrapCanvasTexture('leafcluster_'+baseHex, cv);
+      tex.hasAlpha = true;
+      return tex;
+    });
+  }
+  // Matériau à découpe alpha (alpha TEST, jamais alpha BLEND) pour les
+  // cartes de feuillage : contrairement au blend, le test n'exige aucun
+  // tri par profondeur des faces — chaque pixel est soit opaque soit
+  // totalement transparent, donc aucun risque de scintillement/mauvais
+  // ordre de rendu même avec des centaines d'arbres à l'écran, et le coût
+  // GPU reste proche d'un matériau opaque classique.
+  function mkLeafCardMat(color){
+    const mat = new BABYLON.PBRMaterial(_uid('leafCardMat'), _scene);
+    const tex = texLeafCluster(color);
+    mat.albedoTexture = tex;
+    mat.useAlphaFromAlbedoTexture = true;
+    mat.transparencyMode = BABYLON.Material.MATERIAL_ALPHATEST;
+    mat.backFaceCulling = false; // carte fine vue des deux côtés
+    mat.roughness = 0.75; mat.metallic = 0;
+    mat.metadata = { roughness:0.75, metalness:0 };
+    return mat;
+  }
+  // Éparpille quelques cartes de feuilles découpées SUR un blob de
+  // feuillage déjà construit (mkFoliageBlob) — ne remplace pas le blob
+  // plein (qui garde la silhouette/l'ombre correctes sous tout angle),
+  // vient juste casser sa surface trop lisse par-dessus. `parent` doit
+  // être un mesh/node déjà positionné : les cartes héritent de son
+  // repère local, donc aucun recalcul de position n'est nécessaire aux
+  // sites d'appel dans buildTreeAsset.
+  function addLeafCards(parent, radius, color, count=6){
+    const cardMat = mkLeafCardMat(color);
+    for(let i=0;i<count;i++){
+      const w = radius*(0.55+Math.random()*0.35);
+      const card = BABYLON.MeshBuilder.CreatePlane(_uid('leafCard'), {width:w, height:w*1.15}, _scene);
+      card.material = cardMat;
+      const theta = Math.random()*Math.PI*2, phi = Math.acos(2*Math.random()-1);
+      const r = radius*(0.55+Math.random()*0.5);
+      card.position.set(r*Math.sin(phi)*Math.cos(theta), r*Math.cos(phi)*0.85, r*Math.sin(phi)*Math.sin(theta));
+      card.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+      card.metadata = { castShadow:true };
+      card.parent = parent;
+    }
+  }
   // Segment de tronc/branche texturé écorce (remplace mkCyl pour les
   // arbres spécifiquement — mkCyl reste inchangé, utilisé par ~200 autres
   // assets, pas question d'en changer le rendu partout).
@@ -5341,6 +5800,17 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
     m.roughness = roughness;
     m.metallic = 0;
     m.metadata = { roughness, metalness: 0 };
+    // Même relief "bump from diffuse" que mkBox (voir deriveNormalMapFromCanvas) :
+    // écorce et roche sont les surfaces les plus texturées de la bibliothèque,
+    // celles où l'absence de relief se voyait le plus sous un éclairage rasant.
+    const normTex = deriveNormalMapFromCanvas(albedoTex.name, albedoTex.getContext().canvas);
+    const bump = normTex.clone();
+    bump.getContext().drawImage(normTex.getContext().canvas, 0, 0);
+    bump.update();
+    bump.wrapU = bump.wrapV = albedoTex.wrapU;
+    bump.uScale = albedoTex.uScale; bump.vScale = albedoTex.vScale;
+    bump.level = 0.6;
+    m.bumpTexture = bump;
     return m;
   }
   function mkBarkSegment(rt, rb, h, color, segs=7){
@@ -5400,6 +5870,7 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
       const cy = trunkH + canopyR*0.75;
       const top = mkFoliageBlob(canopyR, canopyColor);
       top.position.y = cy; top.scaling.y = 0.85; top.parent = g;
+      addLeafCards(top, canopyR, canopyColor, 7);
       const lobeCount = 2+Math.floor(Math.random()*2);
       for(let i=0;i<lobeCount;i++){
         const lobeR = canopyR*(0.4+Math.random()*0.2);
@@ -5407,6 +5878,7 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
         const ang = (i/lobeCount)*Math.PI*2 + Math.random()*0.6;
         lobe.position.set(Math.sin(ang)*canopyR*0.65, cy+(Math.random()-0.5)*canopyR*0.5, Math.cos(ang)*canopyR*0.65);
         lobe.metadata={castShadow:true}; lobe.parent = g;
+        addLeafCards(lobe, lobeR, canopyColor, 4);
       }
     } else if(canopyType==='palm'){
       const crown = BABYLON.MeshBuilder.CreateSphere(_uid('crown'), {diameter:0.44,segments:6}, _scene);
@@ -5436,6 +5908,7 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
     } else if(canopyType==='weeping'){
       const top = mkFoliageBlob(canopyR, canopyColor);
       top.position.y = trunkH + canopyR*0.5; top.scaling.set(1.35,0.65,1.35); top.parent = g;
+      addLeafCards(top, canopyR, canopyColor, 7);
       const lobeCount2 = 2+Math.floor(Math.random()*2);
       for(let i=0;i<lobeCount2;i++){
         const lobeR = canopyR*(0.35+Math.random()*0.2);
@@ -5443,6 +5916,7 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
         const ang = (i/lobeCount2)*Math.PI*2 + Math.random()*0.6;
         lobe.position.set(Math.sin(ang)*canopyR*0.7, trunkH+canopyR*0.5+(Math.random()-0.5)*canopyR*0.4, Math.cos(ang)*canopyR*0.7);
         lobe.metadata={castShadow:true}; lobe.parent = g;
+        addLeafCards(lobe, lobeR, canopyColor, 4);
       }
       for(let i=0;i<16;i++){
         const strand = mkCyl(0.02,0.025, 1.0+Math.random()*0.9, canopyColor, 4);
@@ -5461,6 +5935,7 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
       neckBaobab.position.y = trunkH*0.72; neckBaobab.parent = g;
       const top = mkFoliageBlob(canopyR, canopyColor);
       top.position.y = trunkH + canopyR*0.55; top.parent = g;
+      addLeafCards(top, canopyR, canopyColor, 8);
       for(let i=0;i<3;i++){
         const branch = mkBarkSegment(0.12,0.18,canopyR*0.9,trunkColor,5);
         branch.position.y = trunkH; branch.rotation.z = 0.9+i*0.1; branch.rotation.y = i*2.1;
@@ -5558,12 +6033,66 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
     }
     return g;
   }
+  // Ondulations d'eau : canvas gris moyen (neutre en normal map) + bandes
+  // courbes de luminance variable, converties en relief via le même
+  // "bump from diffuse" que le reste du catalogue (deriveNormalMapFromCanvas).
+  // Sert UNIQUEMENT à générer du relief de surface — jamais posée comme
+  // albedo (l'eau garde sa teinte plate habituelle, réglée par appelant).
+  function texWaterRipple(){
+    return cachedTexture('waterripple', ()=>{
+      const cv = document.createElement('canvas'); cv.width=cv.height=256;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#808080'; ctx.fillRect(0,0,256,256);
+      for(let i=0;i<9;i++){
+        const cx=Math.random()*256, cy=Math.random()*256, r=30+Math.random()*70;
+        const grad = ctx.createRadialGradient(cx,cy,r*0.3,cx,cy,r);
+        grad.addColorStop(0,'rgba(255,255,255,0.16)');
+        grad.addColorStop(0.6,'rgba(120,120,120,0.08)');
+        grad.addColorStop(1,'rgba(128,128,128,0)');
+        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+      }
+      for(let i=0;i<420;i++){
+        const shade = 128+(Math.random()-0.5)*50;
+        ctx.fillStyle = `rgba(${shade},${shade},${shade},0.2)`;
+        ctx.fillRect(Math.random()*256,Math.random()*256,1.2,1.2);
+      }
+      return wrapCanvasTexture('waterripple', cv);
+    });
+  }
+  // PBRMaterial pour toute surface d'eau (lacs/étangs/rivières/fontaines/
+  // puits) : jusqu'ici StandardMaterial plat, seul élément du catalogue
+  // resté hors de la passe PBR (Phase 4) — pas de reflet d'environnement
+  // du tout malgré l'IBL déjà branchée pour les arbres/rochers/murs. Un
+  // dielectrique lisse (roughness bas, metallic 0) capte naturellement le
+  // ciel/l'environnement via ensureDefaultEnvironment(), plus un léger
+  // relief de surface (bumpTexture) pour ne pas rester un miroir parfait.
+  function mkWaterMat(color, opacity){
+    const mat = new BABYLON.PBRMaterial(_uid('waterMat'), _scene);
+    mat.albedoColor = hexIntToColor3(color);
+    mat.alpha = opacity ?? 0.82;
+    mat.roughness = 0.1; mat.metallic = 0;
+    mat.metadata = { roughness:0.1, metalness:0 };
+    // texWaterRipple() est un canvas de LUMINANCE (gris + variations), pas
+    // une vraie normal map tangent-space — deriveNormalMapFromCanvas fait
+    // la conversion réelle (passage Sobel), exactement comme pour les
+    // autres textures du catalogue. Poser texWaterRipple() directement en
+    // bumpTexture (sans cette conversion) donnerait un relief incorrect :
+    // un normal map neutre a le canal bleu proche de 255, or un canvas
+    // R=G=B (gris) a systématiquement un bleu bien plus bas.
+    const rippleTex = texWaterRipple();
+    const normTex = deriveNormalMapFromCanvas('waterripple', rippleTex.getContext().canvas);
+    const bump = normTex.clone();
+    bump.getContext().drawImage(normTex.getContext().canvas, 0, 0);
+    bump.update();
+    bump.wrapU = bump.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+    bump.uScale = bump.vScale = 3;
+    bump.level = 0.5;
+    mat.bumpTexture = bump;
+    return mat;
+  }
   function buildWaterPatch(color, w, d, opts){
     opts = opts||{};
-    const mat = mkStdMat(_uid('waterMat'), _scene);
-    mat.diffuseColor = hexIntToColor3(color);
-    mat.alpha = opts.opacity||0.82;
-    mat.metadata = {roughness:0.12, metalness:0.05};
+    const mat = mkWaterMat(color, opts.opacity||0.82);
     const mesh = BABYLON.MeshBuilder.CreateDisc(_uid('water'), {radius:1, tessellation:20}, _scene);
     mesh.material = mat;
     mesh.scaling.set(w/2,d/2,1); mesh.rotation.x=-Math.PI/2; mesh.position.y=0.05;
@@ -5588,6 +6117,25 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
     build:()=> buildTreeAsset(0x8a6a3f, 4, 0.22, 'palm', 0x2f7a3a, 1.4) });
   registerAsset({ id:'nat_baobab', cat:'nature', family:'Arbres', label:'Baobab', icon:'🌳', color:0x9a8060, size:[2.6,4.5,2.6],
     build:()=> buildTreeAsset(0x9a8060, 2.6, 0.75, 'baobab', 0x7a8a3a, 1.5) });
+  // Acacia — silhouette "parasol" typique de la savane, absente jusqu'ici
+  // (la savane n'avait que le baobab en arbre iconique). Aucun canopyType
+  // existant de buildTreeAsset ne fait un plateau plat large : construit
+  // à la main avec les mêmes briques (écorce/feuillage/cartes de feuilles)
+  // plutôt que d'étendre buildTreeAsset pour un seul cas d'usage.
+  registerAsset({ id:'nat_acacia', cat:'nature', family:'Arbres', label:'Acacia', icon:'🌳', color:0x6a7a3a, size:[3.2,3.6,3.2],
+    build:()=>{
+      const g = new BABYLON.TransformNode(_uid('acaciaGrp'), _scene);
+      const trunkH = 2.1+Math.random()*0.5, trunkColor = 0x6b5a42;
+      const trunk = mkBarkSegment(0.1, 0.16, trunkH, trunkColor, 6); trunk.position.y=trunkH/2; trunk.parent = g;
+      // Léger coude vers le haut (les acacias ne poussent presque jamais
+      // parfaitement droits) via une seconde section inclinée.
+      const branch = mkBarkSegment(0.06,0.1,0.7,trunkColor,6); branch.position.y=trunkH+0.15; branch.rotation.z=0.35; branch.parent = g;
+      const canopyColor = 0x7a8a3a;
+      const canopy = mkFoliageBlob(1.5, canopyColor, 2);
+      canopy.position.y = trunkH+0.55; canopy.scaling.set(1.65,0.32,1.65); canopy.parent = g;
+      addLeafCards(canopy, 1.5, canopyColor, 9);
+      return g;
+    }});
   registerAsset({ id:'nat_cherry', cat:'nature', family:'Arbres', label:'Cerisier', icon:'🌸', color:0xf0a8c0, size:[2.4,4,2.4],
     build:()=> buildTreeAsset(0x5c4a3a, 2.6, 0.22, 'round', 0xf0a8c0, 1.5) });
   registerAsset({ id:'nat_maple', cat:'nature', family:'Arbres', label:'Érable', icon:'🍁', color:0xc0562f, size:[2.6,4.5,2.6],
@@ -5630,7 +6178,7 @@ registerAsset({ id:'floor_gravel_dirt', cat:'floors', label:'Chemin de terre', i
     mkTextSprite, mkZonePad, registerAsset, swayingObjects,
     texBamboo, texBrick, texChainlink, texConcrete, texCopper, texCorrugated, texCrackedEarthFloor,
     texDesertSandFloor, texDirtFloor, texFineSandFloor, texGlassCurtain, texGranite, texGrassFloor,
-    texGravelDirtFloor, texIceFloor, texMarble, texMetalFloor, texMudFloor, texObsidian, texPaveFloor,
+    texAsphaltFloor, texGravelDirtFloor, texIceFloor, texMarble, texMetalFloor, texMossFloor, texMudFloor, texObsidian, texPaveFloor,
     texRockySandFloor, texRuins, texRust, texSandFloor, texSnowFloor, texStoneBlock, texStuc,
     texStylizedPanel, texTemple, texTileFloor, texWoodFloor, updateSway,
   };

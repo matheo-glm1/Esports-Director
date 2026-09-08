@@ -342,11 +342,26 @@
   }
   #loading .ring{width:34px;height:34px;border-radius:50%;border:2.5px solid rgba(var(--accent-2-rgb),.2);border-top-color:var(--accent-2);animation:spin .9s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
+  /* Barre de progression du téléchargement du moteur 3D (~8 Mo, Babylon.js
+     n'existe pas en version allégée pour ce mode de chargement) — sans
+     retour visuel, une connexion lente donne l'impression que l'éditeur
+     est figé plutôt que juste en train de charger. */
+  #loadingBar{width:220px;height:4px;border-radius:999px;background:rgba(var(--accent-2-rgb),.15);overflow:hidden;}
+  #loadingBarFill{height:100%;width:0%;background:var(--accent-2);border-radius:999px;transition:width .15s ease;}
+  #loadingPct{font-size:11px;letter-spacing:.1em;color:var(--text-2);opacity:.8;}
+  #loadingLabel{font-size:12px;}
+  #loadingError{display:none;max-width:340px;text-align:center;color:var(--danger);font-size:11px;letter-spacing:normal;text-transform:none;line-height:1.5;}
 </style>
 </head>
 <body>
 
-<div id="loading"><div class="ring"></div><span>Chargement de l'éditeur</span></div>
+<div id="loading">
+  <div class="ring" id="loadingRing"></div>
+  <span id="loadingLabel">Chargement de l'éditeur</span>
+  <div id="loadingBar"><div id="loadingBarFill"></div></div>
+  <span id="loadingPct">0%</span>
+  <div id="loadingError"></div>
+</div>
 
 <div id="app">
   <div id="toolbar">
@@ -462,6 +477,10 @@
     <div>
       <div class="bb-title">Environnement</div>
       <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);margin-bottom:6px;cursor:pointer;">
+        <input type="checkbox" id="gridToggle" checked style="cursor:pointer;">
+        Grille au sol (G)
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);margin-bottom:6px;cursor:pointer;">
         <input type="checkbox" id="dnToggle" style="cursor:pointer;">
         Cycle jour/nuit
       </label>
@@ -474,12 +493,145 @@
 </div>
 <div id="saveToast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/babylonjs@8.33.1/babylon.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@8.33.1/babylonjs.loaders.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/babylonjs-materials@8.33.1/babylonjs.materials.min.js"></script>
-<script src="map_assets_babylon.js"></script>
 <script>
+/* ============================================================
+   CHARGEMENT DU MOTEUR 3D avec barre de progression réelle.
+   Babylon.js (+ ses modules loaders/materials) pèse à lui seul ~8 Mo et
+   n'existe pas en version plus légère pour ce mode de chargement — sur
+   une connexion lente, un simple rond qui tourne indéfiniment est
+   indiscernable d'un vrai blocage (retour utilisateur direct : "ça
+   freeze"). On charge donc ces scripts via fetch() + lecture du flux
+   (au lieu de <script src>) pour connaître la progression réelle
+   (octets reçus / Content-Length) et l'afficher, puis on les injecte
+   comme scripts classiques une fois téléchargés — même comportement
+   qu'un <script src> normal (les CDN sont mis en cache par le
+   navigateur comme d'habitude, donc les ouvertures suivantes restent
+   rapides).
+   ============================================================ */
 (function(){
+  "use strict";
+  // Un seul total englobant TOUT ce qu'il faut charger, dans l'ordre :
+  // les 3 fichiers CDN (suivis octet par octet via fetch) PUIS le fichier
+  // LOCAL map_assets_babylon.js. Ce dernier ne peut pas être suivi en
+  // temps réel de la même façon : fetch() sur un fichier local est
+  // justement bloqué quand la page est ouverte en double-clic (file://)
+  // — même restriction que celle déjà rencontrée sur le site vitrine
+  // (config.json). Il est donc chargé via une balise <script> classique
+  // (voir loadLocalScript plus bas, sans cette restriction), mais sa
+  // taille connue à l'avance (localSize) est bien comptée dans le total
+  // dès le départ pour que la barre reflète VRAIMENT tout ce qui reste à
+  // charger, pas seulement les 3 premiers fichiers.
+  const SCRIPTS = [
+    { url:'https://cdn.jsdelivr.net/npm/babylonjs@8.33.1/babylon.js', label:'Moteur 3D (Babylon.js)' },
+    { url:'https://cdn.jsdelivr.net/npm/babylonjs-loaders@8.33.1/babylonjs.loaders.min.js', label:'Chargeurs de modèles' },
+    { url:'https://cdn.jsdelivr.net/npm/babylonjs-materials@8.33.1/babylonjs.materials.min.js', label:'Matériaux' },
+  ];
+  // Taille approximative de map_assets_babylon.js (mise à jour si le
+  // fichier grossit significativement) — juste pour proportionner la
+  // barre correctement, une légère imprécision ici est sans conséquence.
+  const LOCAL_SCRIPT = { url:'map_assets_babylon.js', label:'Bibliothèque d\'assets', approxSize:374000 };
+
+  const labelEl = document.getElementById('loadingLabel');
+  const barFillEl = document.getElementById('loadingBarFill');
+  const pctEl = document.getElementById('loadingPct');
+  const errorEl = document.getElementById('loadingError');
+  const ringEl = document.getElementById('loadingRing');
+  const loadingEl = document.getElementById('loading');
+
+  const progress = SCRIPTS.map(()=> ({ loaded:0, total:0 }));
+  progress.push({ loaded:0, total:LOCAL_SCRIPT.approxSize }); // index SCRIPTS.length = fichier local
+  const localIndex = SCRIPTS.length;
+
+  function updateProgress(){
+    // Tant que le Content-Length d'un fichier n'est pas encore connu, on
+    // compte simplement ses octets déjà reçus comme "total provisoire" —
+    // la barre reste monotone (ne recule jamais) et se corrige dès que
+    // l'en-tête arrive, plutôt que d'afficher un pourcentage éventuellement
+    // faux en l'absence de Content-Length (rare, mais pas à exclure).
+    let loaded = 0, total = 0;
+    progress.forEach(p=>{ loaded += p.loaded; total += Math.max(p.total, p.loaded); });
+    // Plafonné à 99% ici : le vrai 100% n'est posé qu'une fois
+    // startMapEditorApp() entièrement terminée (voir plus bas) — pour que
+    // "100%" et "tout s'affiche" arrivent exactement au même instant,
+    // jamais un pourcentage à 100% avec un écran encore figé derrière.
+    const pct = total>0 ? Math.min(99, Math.round(loaded/total*100)) : 0;
+    barFillEl.style.width = pct + '%';
+    pctEl.textContent = pct + '%';
+  }
+
+  async function loadScriptWithProgress(src, index){
+    const res = await fetch(src);
+    if(!res.ok) throw new Error(`${src} → HTTP ${res.status}`);
+    progress[index].total = Number(res.headers.get('content-length')) || 0;
+    const reader = res.body.getReader();
+    const chunks = [];
+    for(;;){
+      const { done, value } = await reader.read();
+      if(done) break;
+      chunks.push(value);
+      progress[index].loaded += value.length;
+      updateProgress();
+    }
+    const code = new TextDecoder('utf-8').decode(
+      chunks.length===1 ? chunks[0] : chunks.reduce((acc,c)=>{
+        const merged = new Uint8Array(acc.length+c.length); merged.set(acc); merged.set(c, acc.length); return merged;
+      }, new Uint8Array())
+    );
+    const script = document.createElement('script');
+    script.text = code;
+    document.head.appendChild(script);
+  }
+
+  function loadLocalScript(src, index){
+    return new Promise((resolve, reject)=>{
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = () => {
+        // Pas de suivi octet par octet possible ici (voir plus haut) :
+        // la barre saute directement à "fini" pour ce fichier dès que le
+        // navigateur signale son exécution terminée.
+        progress[index].loaded = progress[index].total;
+        updateProgress();
+        resolve();
+      };
+      script.onerror = () => reject(new Error(`${src} → échec de chargement`));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function loadAll(){
+    for(let i=0;i<SCRIPTS.length;i++){
+      labelEl.textContent = SCRIPTS[i].label;
+      await loadScriptWithProgress(SCRIPTS[i].url, i);
+    }
+    labelEl.textContent = LOCAL_SCRIPT.label;
+    await loadLocalScript(LOCAL_SCRIPT.url, localIndex);
+  }
+
+  loadAll()
+    .then(()=>{
+      window.startMapEditorApp();
+      // startMapEditorApp() est entièrement synchrone (scène, UI, premier
+      // frame demandé) : à ce stade tout est réellement prêt. On pose le
+      // vrai 100% et on masque l'écran de chargement dans la foulée —
+      // jamais avant, jamais après.
+      barFillEl.style.width = '100%';
+      pctEl.textContent = '100%';
+      loadingEl.style.opacity = '0';
+      setTimeout(()=> loadingEl.remove(), 400);
+    })
+    .catch(err=>{
+      console.error('Échec du chargement du moteur 3D :', err);
+      ringEl.style.display = 'none';
+      labelEl.textContent = 'Impossible de charger l\'éditeur';
+      errorEl.style.display = 'block';
+      errorEl.textContent = 'Vérifiez votre connexion internet puis rechargez la page (F5). '
+        + 'Détail technique : ' + (err && err.message ? err.message : err);
+    });
+})();
+</script>
+<script>
+function startMapEditorApp(){
   "use strict";
 
   /* ============================================================
@@ -758,7 +910,16 @@
   // build() (contrairement à Three, où géométries/textures étaient
   // indépendantes de la scène) — c'est le seul ajout au contrat public.
   window.MapAssets.init(scene);
-  window.MapAssets.ensureDefaultEnvironment(scene); // IBL requis par les PBRMaterial écorce/feuillage (Phase 4) — sans effet sur le reste (StandardMaterial)
+  // RÉACTIVÉ : sans elle, les PBRMaterial (arbres, terrain de l'anneau de
+  // biome) rendent en NOIR PLEIN, pas juste "plus ternes" comme prévu —
+  // le rendu direct (hémisphère+soleil) ne suffit pas à lui seul pour ce
+  // moteur/cette version de Babylon. Un instant désactivée en pensant
+  // qu'elle causait un blocage au lancement de l'éditeur — confirmé
+  // depuis que ce blocage venait juste de la taille de Babylon.js
+  // lui-même (voir la barre de progression du chargement), pas de cette
+  // texture ; l'appel est fire-and-forget (async, ne bloque rien), donc
+  // aucune raison de la garder désactivée.
+  window.MapAssets.ensureDefaultEnvironment(scene);
   // Ces méthodes n'existent pas sur BABYLON.Scene ; posées sur l'INSTANCE
   // (jamais sur le prototype) pour ne rien perturber côté moteur. Un noeud
   // créé avec la scène en fait déjà partie -> add() est un no-op ; remove()
@@ -940,14 +1101,14 @@
   window.addEventListener('resize', resizeRenderer);
 
   const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0,1,0), scene);
-  hemi.diffuse = hexToColor3(0x9fb4c9); hemi.groundColor = hexToColor3(0x2a2620); hemi.intensity = 0.75;
+  hemi.diffuse = hexToColor3(0x9fb4c9); hemi.groundColor = hexToColor3(0x2a2620); hemi.intensity = 1.15; // aligné sur DN_PALETTE.day (relevé, terrain en PBR)
   scene.add(hemi);
   // Chez Babylon une DirectionalLight se définit par sa DIRECTION ; la
   // position ne sert qu'au cadrage de la shadow map. On garde donc les
   // deux en phase (direction = -position normalisée), comme le faisait
   // implicitement Three.js en visant l'origine.
   const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(40,-60,-25).normalize(), scene);
-  sun.diffuse = hexToColor3(0xffffff); sun.intensity = 0.9;
+  sun.diffuse = hexToColor3(0xffffff); sun.intensity = 1.3; // aligné sur DN_PALETTE.day (relevé, terrain en PBR)
   sun.position.set(-40,60,25);
   sun.castShadow = true;
   // Résolution + frustum d'ombre : la grille fait 400×400 mais le
@@ -1056,14 +1217,56 @@
   const PLAY_CELLS_X = 70, PLAY_CELLS_Z = 50; // cases demandées
   const PLAY_HALF_X = PLAY_CELLS_X*PLAY_CELL/2; // 70
   const PLAY_HALF_Z = PLAY_CELLS_Z*PLAY_CELL/2; // 50
+  // Texture de détail neutre (grain fin + mottes), partagée par le sol
+  // constructible ci-dessous ET par le terrain de l'anneau de biome (voir
+  // regenerateBiomeRing plus bas) — un seul générateur, un seul appel
+  // (mise en cache), pour que les deux zones aient exactement le même
+  // grain de surface plutôt que deux textures de bruit différentes.
+  let _terrainDetailTex = null;
+  function terrainDetailTexture(sceneRef){
+    if(_terrainDetailTex) return _terrainDetailTex;
+    const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#808080'; ctx.fillRect(0,0,256,256);
+    for(let i=0;i<7000;i++){
+      const x=Math.random()*256, y=Math.random()*256, r=Math.random()*1.8+0.4;
+      const shade = Math.round(128 + (Math.random()-0.5)*170);
+      ctx.fillStyle = `rgba(${shade},${shade},${shade},${(0.22+Math.random()*0.3).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+    }
+    for(let i=0;i<70;i++){
+      const x=Math.random()*256, y=Math.random()*256, r=8+Math.random()*22;
+      const shade = Math.round(128 + (Math.random()-0.5)*80);
+      ctx.fillStyle = `rgba(${shade},${shade},${shade},0.16)`;
+      ctx.beginPath(); ctx.ellipse(x,y,r,r*0.7,Math.random()*Math.PI,0,Math.PI*2); ctx.fill();
+    }
+    const tex = new BABYLON.DynamicTexture('terrainDetailTex', cv, sceneRef, true);
+    tex.update();
+    tex.wrapU = tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+    tex.uScale = tex.vScale = 55; // motifs plus grands et donc plus lisibles à la distance de caméra habituelle de l'éditeur
+    _terrainDetailTex = tex;
+    return tex;
+  }
   const groundPlane = BABYLON.MeshBuilder.CreatePlane('groundPlane', {
     width: PLAY_HALF_X*2, height: PLAY_HALF_Z*2, sideOrientation: BABYLON.Mesh.DOUBLESIDE
   }, scene);
+  // PBRMaterial (au lieu de StandardMaterial) : le sol constructible
+  // "vierge" (avant qu'on y pose la moindre tuile) répond maintenant à la
+  // lumière comme le reste de la bibliothèque PBR (même rugosité, même
+  // réponse à l'environnement), sans jamais varier en hauteur
+  // (contrairement au terrain de l'anneau) — signalé : "le sol vierge
+  // puisse être le même que le biome mais en restant plat".
+  // PAS de detailMap ici (contrairement à terrainMat, l'anneau) : sur un
+  // albedoColor uni sans albedoTexture, le blend du detailMap délave toute
+  // la couleur vers un gris terne au lieu de simplement la texturer —
+  // fonctionne bien sur l'anneau uniquement parce que sa base, ce sont des
+  // COULEURS DE SOMMET, pas un albedoColor plat comme ici.
   groundPlane.material = (()=>{
-    const m = new BABYLON.StandardMaterial('groundPlaneMat', scene);
-    m.diffuseColor = hexToColor3(0x252b34);
-    m.specularColor = new BABYLON.Color3(0,0,0);
-    m.metadata = { roughness:0.95 }; // pas d'équivalent StandardMaterial : conservé pour la passe PBR (Phase 4)
+    const m = new BABYLON.PBRMaterial('groundPlaneMat', scene);
+    m.albedoColor = hexToColor3(0x252b34);
+    m.roughness = 0.95; m.metallic = 0.02;
+    m.metadata = { roughness:0.95, metalness:0.02 };
+    m.backFaceCulling = false; // équivalent de side: Three.DoubleSide — sans ça, plan invisible sous certains angles de vue (vu d'en haut, notamment)
     return m;
   })();
   groundPlane.rotation.x = -Math.PI/2;
@@ -1093,7 +1296,13 @@
   };
   let currentBiomeKey = 'mixed';
   function recolorGroundPlane(biomeKey){
-    groundPlane.material.color.setHex(BIOME_GROUND_COLOR[biomeKey] ?? BIOME_GROUND_COLOR.mixed);
+    // .albedoColor (PBRMaterial) plutôt que .color, qui n'existe sur
+    // AUCUN matériau Babylon (.diffuseColor pour StandardMaterial,
+    // .albedoColor pour PBRMaterial) — un reste de portage Three.js
+    // (THREE.MeshStandardMaterial, lui, expose bien .color). Jamais
+    // remarqué jusqu'ici car regenerateBiomeRing() plantait juste avant
+    // d'arriver ici (voir la correction de clearBiomeScene() plus haut).
+    groundPlane.material.albedoColor = hexToColor3(BIOME_GROUND_COLOR[biomeKey] ?? BIOME_GROUND_COLOR.mixed);
   }
   // Choix de biome : régénère l'anneau de terrain (aperçu éditeur),
   // recolore le sol constructible, ET pose/remplace un marqueur invisible
@@ -1265,11 +1474,21 @@
   // bas) — on ne veut pas rogner sur les optimisations FPS précédentes
   // pour une fonctionnalité que tout le monde n'utilisera pas.
   const dayNight = { enabled:false, t:0.5, speed:0.015, autoEnvTimer:0 };
+  // Intensités relevées (perf) : réglées à l'origine pour StandardMaterial,
+  // trop sombres depuis le passage du terrain en PBRMaterial (rendu
+  // physique, moins "généreux" en lumière qu'un shading non physique pour
+  // la même intensité nominale — signalé "on voit rien" sur les biomes).
   const DN_PALETTE = {
-    night:  { top:0x040814, bottom:0x0a1626, sunCol:0x4a6ea8, hemiSky:0x0d1a2e, hemiGround:0x05070c, hemiI:0.18, sunI:0.0,  fog:0x040814 },
-    dawn:   { top:0x2a4a7a, bottom:0xffb37a, sunCol:0xffb37a, hemiSky:0x6a7a9a, hemiGround:0x3a2a20, hemiI:0.55, sunI:0.55, fog:0x8a6a5a },
-    day:    { top:0x2a5ca0, bottom:0xbfd8e8, sunCol:0xfff3d6, hemiSky:0x9fb4c9, hemiGround:0x2a2620, hemiI:0.75, sunI:0.9,  fog:0x1a1e26 },
-    dusk:   { top:0x3a2a5a, bottom:0xff8a5a, sunCol:0xff8a5a, hemiSky:0x5a4a6a, hemiGround:0x2a1a1a, hemiI:0.5,  sunI:0.45, fog:0x4a2a3a },
+    night:  { top:0x040814, bottom:0x0a1626, sunCol:0x4a6ea8, hemiSky:0x0d1a2e, hemiGround:0x05070c, hemiI:0.32, sunI:0.15, fog:0x040814 },
+    dawn:   { top:0x2a4a7a, bottom:0xffb37a, sunCol:0xffb37a, hemiSky:0x6a7a9a, hemiGround:0x3a2a20, hemiI:0.84, sunI:0.79, fog:0x8a6a5a },
+    // fog:0xbfd8e8 (au lieu de 0x1a1e26, un bleu marine quasi noir — même
+    // teinte que la nuit, oubliée ici en pleine journée) : reprend la
+    // couleur d'horizon du ciel (bottom, juste au-dessus) pour que
+    // l'anneau de biome se fonde dans une brume claire cohérente au loin,
+    // pas dans un mur sombre qui rendait montagnes/arbres noirs dès
+    // qu'ils sortaient de la zone constructible (signalé "biomes noirs").
+    day:    { top:0x2a5ca0, bottom:0xbfd8e8, sunCol:0xfff3d6, hemiSky:0x9fb4c9, hemiGround:0x2a2620, hemiI:1.15, sunI:1.3,  fog:0xbfd8e8 },
+    dusk:   { top:0x3a2a5a, bottom:0xff8a5a, sunCol:0xff8a5a, hemiSky:0x5a4a6a, hemiGround:0x2a1a1a, hemiI:0.77, sunI:0.65, fog:0x4a2a3a },
   };
   function lerpColorHex(a,b,t){ return hexToColor3(a).lerp(hexToColor3(b), t).getHex(); }
   function pickPalette(t){
@@ -1356,11 +1575,27 @@
   function addBiomeObj(obj){ scene.add(obj); finalizeShadowCasters(obj); biomeSceneObjects.push(obj); return obj; }
   function clearBiomeScene(){
     biomeSceneObjects.forEach(o=>{
-      // Babylon : dispose(doNotRecurse=false, disposeMaterialAndTextures=true)
-      // détruit d'un coup le noeud, toute sa descendance, ses géométries ET
-      // ses matériaux/textures — ce que faisaient à la main les deux lignes
-      // de traverse() côté Three.js. Pas de fuite mémoire GPU non plus.
-      if(o && o.dispose) o.dispose(false, true);
+      if(!o || !o.dispose) return;
+      // PAS dispose(false, true) : ce 2e argument force aussi la
+      // destruction des TEXTURES du matériau — or celles des assets PBR
+      // (écorce/feuillage/roche, voir mkPbrMat/texLeafy/texRockSurface
+      // dans map_assets_babylon.js) viennent d'un cache PARTAGÉ
+      // (cachedTexture()), réutilisé par tous les objets de même
+      // couleur/type, y compris ceux à venir lors de la PROCHAINE
+      // régénération. Les détruire ici les rendait inutilisables au choix
+      // de biome suivant (mkPbrMat plantait sur
+      // `albedoTex.getContext().canvas`, .getContext() renvoyant null sur
+      // une texture déjà disposée) — la régénération s'interrompait donc
+      // en pleine construction de l'anneau, AVANT même de recolorer le
+      // sol (recolorGroundPlane, appelée juste après dans applyBiome),
+      // d'où l'impression de biomes qui ne s'appliquaient jamais.
+      // On dispose donc chaque matériau individuellement (jamais
+      // partagés, un par objet : sûr à détruire) SANS forcer la
+      // destruction de ses textures, puis le noeud lui-même.
+      const meshes = o.getChildMeshes ? o.getChildMeshes(false) : [];
+      if(o.material) meshes.push(o);
+      meshes.forEach(m=>{ if(m.material && m.material.dispose) m.material.dispose(false, false); });
+      o.dispose(false, false);
     });
     biomeSceneObjects = [];
   }
@@ -1589,33 +1824,9 @@
     terrainGeo.indices = gIndices;
     terrainGeo.normals = [];
     BABYLON.VertexData.ComputeNormals(terrainGeo.positions, terrainGeo.indices, terrainGeo.normals);
-    // Texture de détail neutre (grise, indépendante du biome) : grain fin +
-    // mottes plus larges, répétée à haute fréquence. Un detailMap Babylon
-    // encode ses variations autour du gris moyen (0.5) — une valeur neutre
-    // n'altère pas la couleur de sommet en dessous, donc ce grain se pose
-    // à l'identique sur n'importe quel mélange de biomes.
-    function makeTerrainDetailTexture(sceneRef){
-      const cv = document.createElement('canvas'); cv.width = cv.height = 256;
-      const ctx = cv.getContext('2d');
-      ctx.fillStyle = '#808080'; ctx.fillRect(0,0,256,256);
-      for(let i=0;i<7000;i++){
-        const x=Math.random()*256, y=Math.random()*256, r=Math.random()*1.8+0.4;
-        const shade = Math.round(128 + (Math.random()-0.5)*170);
-        ctx.fillStyle = `rgba(${shade},${shade},${shade},${(0.22+Math.random()*0.3).toFixed(3)})`;
-        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
-      }
-      for(let i=0;i<70;i++){
-        const x=Math.random()*256, y=Math.random()*256, r=8+Math.random()*22;
-        const shade = Math.round(128 + (Math.random()-0.5)*80);
-        ctx.fillStyle = `rgba(${shade},${shade},${shade},0.16)`;
-        ctx.beginPath(); ctx.ellipse(x,y,r,r*0.7,Math.random()*Math.PI,0,Math.PI*2); ctx.fill();
-      }
-      const tex = new BABYLON.DynamicTexture('terrainDetailTex', cv, sceneRef, true);
-      tex.update();
-      tex.wrapU = tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
-      tex.uScale = tex.vScale = 55; // motifs plus grands et donc plus lisibles à la distance de caméra habituelle de l'éditeur
-      return tex;
-    }
+    // Texture de détail : voir terrainDetailTexture(), déclarée plus haut
+    // (partagée avec le sol constructible — un seul grain de surface pour
+    // les deux zones, mis en cache après le premier appel).
     // PBRMaterial (Phase 4) : la rugosité posée en metadata depuis la Phase 3
     // devient enfin réellement appliquée au rendu. Les couleurs de sommet
     // (dégradé continu entre biomes voisins) restent lues automatiquement
@@ -1631,7 +1842,7 @@
     // du biome) répétée à haute fréquence — s'applique identiquement quel
     // que soit le mélange de couleurs en dessous, donc compatible avec le
     // dégradé continu entre biomes voisins.
-    terrainMat.detailMap.texture = makeTerrainDetailTexture(scene);
+    terrainMat.detailMap.texture = terrainDetailTexture(scene);
     terrainMat.detailMap.isEnabled = true;
     terrainMat.detailMap.diffuseBlendLevel = 1;
     const terrainMesh = new BABYLON.Mesh('terrain', scene);
@@ -1699,6 +1910,23 @@
       // rattaché au thème lui-même (signalé : "ça a l'air vide").
       iceBlock: { geo:()=> BABYLON.MeshBuilder.CreatePolyhedron('iceBlock', {type:3, size:1}, scene), color:0xd8ecf2, matOpts:{roughness:0.25, metalness:0.05}, items:[] },
       snowPatch: { geo:()=> BABYLON.MeshBuilder.CreateCylinder('snowPatch', {diameterTop:0, diameterBottom:2, height:0.35, tessellation:6}, scene), color:0xf2f6f8, matOpts:{roughness:0.85}, items:[] },
+      // ---- Micro-détails (voir scatterMicroDetails plus bas) : petites
+      // pierres, feuilles mortes, mousse, branches cassées, sol nu/érodé,
+      // champignons, traces d'animaux — demandés explicitement en plus du
+      // semis principal ci-dessus, jamais couverts jusqu'ici.
+      pebble:      { geo:()=> BABYLON.MeshBuilder.CreatePolyhedron('pebble', {type:2, size:1}, scene), color:0x8a8578, matOpts:{roughness:0.9}, items:[] },
+      // sideOrientation:DOUBLESIDE sur les 3 disques ci-dessous : une fois
+      // couchés à plat (tiltX=Math.PI/2, voir scatterMicroDetails), sans
+      // ça leur face seraient invisibles vue d'un côté selon le signe
+      // exact de la rotation — même précaution que les mares/cours d'eau
+      // existants un peu plus haut.
+      leafLitter:  { geo:()=> BABYLON.MeshBuilder.CreateDisc('leafLitter', {radius:1, tessellation:7, sideOrientation:BABYLON.Mesh.DOUBLESIDE}, scene), color:0x8a5a2f, matOpts:{roughness:1}, items:[] },
+      mossPatch:   { geo:()=> BABYLON.MeshBuilder.CreateDisc('mossPatch', {radius:1, tessellation:8, sideOrientation:BABYLON.Mesh.DOUBLESIDE}, scene), color:0x3f6b3a, matOpts:{roughness:1}, items:[] },
+      deadBranch:  { geo:()=> BABYLON.MeshBuilder.CreateCylinder('deadBranch', {diameterTop:0.08, diameterBottom:0.14, height:1, tessellation:5}, scene), color:0x5c4a35, matOpts:{roughness:1}, items:[] },
+      groundPatch: { geo:()=> BABYLON.MeshBuilder.CreateDisc('groundPatch', {radius:1, tessellation:8, sideOrientation:BABYLON.Mesh.DOUBLESIDE}, scene), color:0x9a8060, matOpts:{roughness:1}, items:[] },
+      mushroomCap: { geo:()=> BABYLON.MeshBuilder.CreateCylinder('mushroomCap', {diameterTop:0, diameterBottom:1, height:0.6, tessellation:8}, scene), color:0xc0472b, matOpts:{roughness:0.75}, items:[] },
+      mushroomStem:{ geo:()=> BABYLON.MeshBuilder.CreateCylinder('mushroomStem', {diameterTop:0.14,diameterBottom:0.17, height:1, tessellation:6}, scene), color:0xe8e0c8, matOpts:{roughness:0.9}, items:[] },
+      track:       { geo:()=> BABYLON.MeshBuilder.CreateDisc('track', {radius:1, tessellation:6, sideOrientation:BABYLON.Mesh.DOUBLESIDE}, scene), color:0x2a2420, matOpts:{roughness:1}, items:[] },
     };
     function pushInstance(bucket, x,y,z, ry, sx,sy,sz, tiltX,tiltZ, color){
       if(instBuckets[bucket].items.length >= MAX_INSTANCES) return;
@@ -1746,6 +1974,18 @@
     // inclinés/légèrement déformés") + une couette de feuillage
     // (conifère ou feuillu selon le biome).
     function scatterTree(x,z,groundY,conifer){
+      // Tronc et feuillage vivent dans deux buckets DIFFÉRENTS (voir
+      // instBuckets), chacun plafonné indépendamment à MAX_INSTANCES — le
+      // tronc encaisse TOUS les arbres (conifères + feuillus confondus)
+      // tandis que le feuillage se répartit sur deux buckets séparés
+      // (foliageCone/foliageRound). Le tronc peut donc saturer avant le
+      // feuillage correspondant, laissant des troncs orphelins SANS
+      // feuillage (silhouette en "bâton nu", signalée par un joueur). Un
+      // seul contrôle avant de pousser QUOI QUE CE SOIT — soit les deux
+      // moitiés de l'arbre sont ajoutées, soit aucune — garantit qu'un
+      // tronc n'existe jamais sans son feuillage.
+      const foliageBucket = conifer?'foliageCone':'foliageRound';
+      if(instBuckets.trunk.items.length >= MAX_INSTANCES || instBuckets[foliageBucket].items.length >= MAX_INSTANCES) return;
       const trunkH = 3+Math.random()*4.5;
       const lean = (Math.random()-0.5)*0.28;
       const trunkR = 0.7+Math.random()*0.5;
@@ -1754,7 +1994,7 @@
       const foliageR = conifer ? 1.3+Math.random()*1.6 : 1.6+Math.random()*1.9;
       const foliageH = conifer ? foliageR*2.4 : foliageR*1.05; // feuillu large et arrondi, pas étiré (sinon l'icosaèdre lit comme un conifère pointu)
       const tint = offsetHSL(hexToColor3(conifer?0x2f5c34:0x4a7a3a), 0,0,(Math.random()-0.5)*0.12);
-      pushInstance(conifer?'foliageCone':'foliageRound', x+lean*trunkH*0.4, topY, z+lean*0.6*trunkH*0.4, Math.random()*Math.PI*2, foliageR, foliageH, foliageR, 0,0, tint);
+      pushInstance(foliageBucket, x+lean*trunkH*0.4, topY, z+lean*0.6*trunkH*0.4, Math.random()*Math.PI*2, foliageR, foliageH, foliageR, 0,0, tint);
       if(Math.random()<0.3){
         for(let i=0;i<2+Math.floor(Math.random()*2);i++){
           const rAng = Math.random()*Math.PI*2, rDist = trunkR*1.6+Math.random()*0.6;
@@ -1940,32 +2180,115 @@
         }
       }
     }
+
+    // ---- Micro-détails : petites pierres, feuilles mortes, mousse,
+    // branches cassées, sol nu/érodé, champignons, flaques, traces
+    // d'animaux — demandés explicitement en plus du semis principal
+    // ci-dessus, qui n'en posait aucun. Passe INDÉPENDANTE (mêmes
+    // coordonnées de sondage que le semis principal, mais son propre tirage
+    // aléatoire) et volontairement légère : un DÉTAIL qui casse la
+    // monotonie du sol, jamais un second semis dense qui ferait doublon.
+    // Jamais en ville (identité "rue propre" déjà établie ci-dessus) ni sur
+    // la zone constructible plate (dominant==='flat').
+    const puddleMat = new BABYLON.StandardMaterial('puddleMat', scene);
+    puddleMat.diffuseColor = hexToColor3(0x2f6f8f);
+    puddleMat.specularColor = new BABYLON.Color3(0.05,0.05,0.05);
+    puddleMat.alpha = 0.75;
+    puddleMat.backFaceCulling = false;
+    (function scatterMicroDetails(){
+      const MICRO_SAMPLES = 2200;
+      for(let i=0;i<MICRO_SAMPLES;i++){
+        const theta = Math.random()*Math.PI*2;
+        const innerR = squareEdgeR(theta);
+        const r = innerR + EDGE_BLEND + Math.random()*(OUTER_R-innerR-EDGE_BLEND);
+        const x = Math.cos(theta)*r, z = Math.sin(theta)*r;
+        const samp = terrainSample(x,z);
+        const dom = samp.dominant;
+        if(dom==='city' || dom==='flat') continue;
+        const y = samp.height;
+        const roll = Math.random();
+        const isForest = (dom==='temperate'||dom==='taiga'||dom==='tropical');
+        const isHumid = (dom==='swamp'||dom==='tropical'||dom==='temperate'||dom==='prairie');
+        const isDry = (dom==='desert'||dom==='savanna'||dom==='canyon');
+        // Petites pierres — universel, la plus fréquente des micro-détails.
+        if(roll<0.1){
+          pushInstance('pebble', x,y,z, Math.random()*Math.PI*2, 0.08+Math.random()*0.1,0.06+Math.random()*0.08,0.08+Math.random()*0.1);
+        }
+        // Feuilles mortes / mousse / branches cassées / champignons —
+        // biomes boisés uniquement (sous-bois).
+        else if(isForest && roll<0.22){
+          pushInstance('leafLitter', x,y+0.01,z, Math.random()*Math.PI*2, 0.5+Math.random()*0.6,1,0.5+Math.random()*0.6, Math.PI/2,0, offsetHSL(hexToColor3(0x8a5a2f), 0,0,(Math.random()-0.5)*0.15));
+        }
+        else if(isForest && roll<0.30){
+          pushInstance('mossPatch', x,y+0.01,z, Math.random()*Math.PI*2, 0.4+Math.random()*0.5,1,0.4+Math.random()*0.5, Math.PI/2,0);
+        }
+        else if(isForest && roll<0.35){
+          pushInstance('deadBranch', x,y+0.05,z, Math.random()*Math.PI*2, 1,0.9+Math.random()*0.8,1, Math.PI/2*(Math.random()<0.5?1:-1),0);
+        }
+        else if(isForest && roll<0.38){
+          // Petit groupe de 2-4 champignons (chapeau+pied), teinte parfois
+          // pâle plutôt que systématiquement rouge.
+          const n = 2+Math.floor(Math.random()*3);
+          for(let k=0;k<n;k++){
+            const ang=Math.random()*Math.PI*2, dist=Math.random()*0.3;
+            const mx=x+Math.cos(ang)*dist, mz=z+Math.sin(ang)*dist;
+            pushInstance('mushroomStem', mx,y,mz, 0, 1,0.12+Math.random()*0.08,1);
+            pushInstance('mushroomCap', mx,y+0.13+Math.random()*0.05,mz, Math.random()*Math.PI*2, 0.14+Math.random()*0.08,1,0.14+Math.random()*0.08, 0,0, hexToColor3(Math.random()<0.7?0xc0472b:0xd8d0b8));
+          }
+        }
+        // Flaques d'eau — biomes humides, matériau semi-transparent partagé
+        // (pas instancié, comme les mares/cours d'eau principaux).
+        else if(isHumid && roll<0.40){
+          const disc = BABYLON.MeshBuilder.CreateDisc('puddle', {radius:0.5+Math.random()*0.7, tessellation:10}, scene);
+          disc.material = puddleMat;
+          disc.rotation.x = -Math.PI/2;
+          disc.position.set(x, y+0.02, z);
+          addBiomeObj(disc);
+        }
+        // Sol nu/érodé — plus fréquent dans les biomes secs, casse la
+        // monotonie de la couverture végétale ailleurs.
+        else if(isDry ? roll<0.55 : roll<0.44){
+          pushInstance('groundPatch', x,y+0.01,z, Math.random()*Math.PI*2, 0.9+Math.random()*0.9,1,0.9+Math.random()*0.9, Math.PI/2,0, offsetHSL(hexToColor3(0x9a8060), 0,0,(Math.random()-0.5)*0.15));
+        }
+        // Traces d'animaux — courte piste de 3-5 empreintes alignées,
+        // volontairement rare (une découverte, pas un motif systématique).
+        else if(roll<0.46 && Math.random()<0.35){
+          const steps = 3+Math.floor(Math.random()*3);
+          const dir = Math.random()*Math.PI*2, stepLen = 0.35+Math.random()*0.15, side = Math.cos(dir+Math.PI/2), side2 = Math.sin(dir+Math.PI/2);
+          for(let s=0;s<steps;s++){
+            const off = (s%2?1:-1)*0.12;
+            const px = x+Math.cos(dir)*s*stepLen + side*off, pz = z+Math.sin(dir)*s*stepLen + side2*off;
+            pushInstance('track', px, terrainSample(px,pz).height+0.01, pz, dir, 0.12,1,0.18, Math.PI/2,0);
+          }
+        }
+      }
+    })();
+
     Object.keys(instBuckets).forEach(flushBucket);
 
     // Quelques props "hero" non instanciés, réutilisant les assets
     // Nature déjà présents dans l'éditeur (variété supplémentaire à
-    // faible coût, car peu nombreux). Pools spécifiques par biome — avant
-    // ceci ne piochait que dans 8 props génériques (troncs/fougères/
-    // champignons/buissons) recyclés partout, et Désert/Ville n'avaient
-    // même AUCUNE entrée (donc zéro prop hero du tout) : c'était la vraie
-    // raison pour laquelle les biomes se ressemblaient tous et paraissaient
-    // vides/génériques, indépendamment de la densité. Repris du même pool
-    // déjà utilisé (et qui fonctionne bien) côté moteur de match
-    // (MATCH_BIOME_SCATTER dans valorant_ai_match.html) pour que l'aperçu
-    // éditeur corresponde enfin à ce qui s'affiche vraiment en jeu.
+    // faible coût, car peu nombreux). Pools resserrés (Phase 5, identité
+    // AAA par biome — "moins de 30% d'éléments visuels partagés entre deux
+    // biomes") : la version précédente réutilisait nat_bush/nat_deadtree/
+    // nat_log/nat_fern/nat_mushroom génériquement dans 5 à 7 biomes sur 12,
+    // rendant plusieurs biomes quasi indiscernables sans regarder la seule
+    // couleur du sol. Miroir exact de MATCH_BIOME_SCATTER dans
+    // valorant_match_engine.js — même liste des deux côtés, pour que
+    // l'aperçu éditeur corresponde à ce qui s'affiche vraiment en jeu.
     const HERO_POOLS = {
       mixed:     ['nat_oak','nat_bush','nat_fern','nat_mushroom','nat_log'],
-      temperate: ['nat_log','nat_deadtree','nat_fern','nat_bush','nat_mushroom','nat_oak','nat_birch','nat_maple'],
-      tropical:  ['nat_log','nat_deadtree','nat_fern','nat_bush','nat_mushroom','nat_palm','nat_liana','nat_flowerbush'],
-      taiga:     ['nat_log','nat_bush','nat_fir','nat_pine','nat_stump','nat_deadtree'],
-      prairie:   ['nat_fern','nat_mushroom','nat_flowers','nat_bush','nat_prairie2','nat_flower_red','nat_flower_yellow','nat_sunflower','nat_tallgrass'],
-      savanna:   ['nat_fern','nat_mushroom','nat_flowers','nat_bush','nat_baobab','nat_tallgrass','nat_drybush','nat_rock2'],
-      canyon:    ['nat_log','nat_deadtree','nat_cliff','nat_rock_l','nat_bigrock','nat_crater'],
-      swamp:     ['nat_log','nat_deadtree','nat_mangrove','nat_reed','nat_algae','nat_bramble','nat_lily'],
-      mountain:  ['nat_deadtree','nat_bush','nat_spire','nat_cliff','nat_bigrock','nat_rock_l'],
-      tundra:    ['nat_deadtree','nat_bush','nat_iceblock','nat_snowpile','nat_icefloe'],
-      desert:    ['nat_cactus','nat_cactus_giant','nat_dune2','nat_rock_m','nat_drybush'],
-      city:      ['nat_crystal_blue','nat_crystal_green','nat_rock_m'],
+      temperate: ['nat_cherry','nat_maple','nat_birch','nat_bamboo'],
+      tropical:  ['nat_palm','nat_liana','nat_vine','nat_flowerbush'],
+      taiga:     ['nat_fir','nat_pine','nat_deadtree','nat_stump'],
+      prairie:   ['nat_prairie2','nat_sunflower','nat_flower_red','nat_flower_yellow','nat_tallgrass'],
+      savanna:   ['nat_baobab','nat_acacia','nat_drybush','nat_rock2'],
+      canyon:    ['nat_crater','nat_cliff','nat_rock_m','nat_rock_s'],
+      swamp:     ['nat_mangrove','nat_algae','nat_bramble','nat_log'],
+      mountain:  ['nat_spire','nat_cliff','nat_bigrock','nat_rock_l'],
+      tundra:    ['nat_iceblock','nat_icefloe','nat_glacier','nat_snowpile'],
+      desert:    ['nat_cactus','nat_cactus_giant','nat_agave','nat_dune2'],
+      city:      ['nat_crystal_blue','nat_crystal_green','nat_crystal_red','nat_rock_m'],
     };
     const heroAssetCache = {};
     function heroAssetFor(id){
@@ -2232,6 +2555,103 @@
       g.add(beacon);
       return g;
     }
+    // Trois biomes n'avaient JUSQU'ICI aucune construction secondaire
+    // (tropical/savane/toundra) — signalé, seuls 8 des 11 biomes en
+    // avaient une : ils paraissaient "vides" comparés aux autres malgré
+    // une végétation dense, faute du moindre point d'intérêt bâti.
+    function buildJungleTemple(){
+      // Temple englouti par la jungle : plateforme à degrés (pas un
+      // bâtiment intact), pierre moussue, lianes qui pendent, un pilier
+      // brisé au sommet plutôt qu'une flèche complète — toujours l'état de
+      // ruine envahie, jamais un monument "neuf".
+      const g = new BABYLON.TransformNode('grp', scene);
+      const stone = 0x6b7a5c, mossStone = 0x4f6b42;
+      const tiers = 3+Math.floor(Math.random()*2);
+      let w = 4.6+Math.random()*0.8, h0 = 0;
+      for(let i=0;i<tiers;i++){
+        const th = 0.75+Math.random()*0.15;
+        const tier = mkBox(w, th, w, i%2? mossStone:stone, { roughness:0.96 });
+        tier.position.y = h0 + th/2; // base du palier posée sur le sommet du précédent (mkBox centre par défaut sur sa propre demi-hauteur, jamais sur 0)
+        g.add(tier);
+        h0 += th;
+        w *= 0.72;
+      }
+      // Pilier brisé au sommet (jamais complet — état de ruine).
+      const pillarH = 1.2+Math.random()*0.8;
+      const pillar = mkCyl(0.5,0.55, pillarH, stone, 8);
+      pillar.position.set(0, h0 + pillarH/2, 0);
+      g.add(pillar);
+      // Lianes suspendues (cylindres fins, plusieurs points d'ancrage).
+      for(let i=0;i<5;i++){
+        const ang = (i/5)*Math.PI*2;
+        const vine = mkCyl(0.04,0.04, 1.6+Math.random()*1.4, 0x3f6b32, 5);
+        vine.position.set(Math.cos(ang)*w*1.3, h0*0.6, Math.sin(ang)*w*1.3);
+        vine.rotation.x = Math.PI*0.06*(Math.random()-0.5);
+        g.add(vine);
+      }
+      return g;
+    }
+    function buildSavannaCamp(){
+      // Camp de nomades abandonné : armature de perches sans bâche (pas
+      // un tipi intact), cercle de pierres noircies pour le feu, quelques
+      // jarres cassées — jamais une hutte fermée, toujours "quitté depuis
+      // longtemps".
+      const g = new BABYLON.TransformNode('grp', scene);
+      const wood = 0x8a6a3f, ash = 0x2a2622, clay = 0xb0623a;
+      const poleH = 2.4+Math.random()*0.6, poleCount = 5+Math.floor(Math.random()*2);
+      for(let i=0;i<poleCount;i++){
+        const ang = (i/poleCount)*Math.PI*2 + Math.random()*0.2;
+        const lean = 0.14+Math.random()*0.05;
+        const pole = mkCyl(0.05,0.07, poleH, wood, 5);
+        pole.position.set(Math.cos(ang)*0.5, 0, Math.sin(ang)*0.5);
+        pole.rotation.z = Math.cos(ang)*lean; pole.rotation.x = -Math.sin(ang)*lean;
+        g.add(pole);
+      }
+      // Cercle de pierres du foyer, cendres au centre.
+      for(let i=0;i<7;i++){
+        const ang = (i/7)*Math.PI*2;
+        const stone = BABYLON.MeshBuilder.CreatePolyhedron('campstone', {type:2, size:0.18+Math.random()*0.1}, scene);
+        stone.material = (()=>{ const m=new BABYLON.StandardMaterial('campstoneMat', scene); m.diffuseColor=hexToColor3(0x847f70); m.specularColor=new BABYLON.Color3(0,0,0); return m; })();
+        stone.position.set(Math.cos(ang)*1.1, 0.12, Math.sin(ang)*1.1);
+        g.add(stone);
+      }
+      const ashPatch = BABYLON.MeshBuilder.CreateDisc('ash', {radius:0.85, tessellation:10}, scene);
+      ashPatch.material = (()=>{ const m=new BABYLON.StandardMaterial('ashMat', scene); m.diffuseColor=hexToColor3(ash); m.specularColor=new BABYLON.Color3(0,0,0); return m; })();
+      ashPatch.rotation.x = -Math.PI/2; ashPatch.position.y = 0.02;
+      g.add(ashPatch);
+      // Jarre en argile renversée, cassée.
+      const jar = mkCyl(0.22,0.3, 0.5, clay, 8);
+      jar.rotation.z = Math.PI/2.3;
+      jar.position.set(1.6+Math.random()*0.6, 0.22, -0.6);
+      g.add(jar);
+      return g;
+    }
+    function buildIceShelter(){
+      // Abri de glace effondré : dôme partiellement écroulé (jamais
+      // intact), entrée sombre, et un tas d'ossements gelés à côté
+      // ("fossiles/ossements" — vie ancienne prise dans le permafrost).
+      const g = new BABYLON.TransformNode('grp', scene);
+      const ice = 0xd8ecf2, iceDark = 0xa8c8d2, bone = 0xe8e2d0;
+      const dome = BABYLON.MeshBuilder.CreateSphere('icedome', {diameter:3.2+Math.random()*0.8, segments:10, slice:0.55}, scene);
+      dome.material = (()=>{ const m=new BABYLON.PBRMaterial('icedomeMat', scene); m.albedoColor=hexToColor3(ice); m.roughness=0.3; m.metallic=0.05; m.metadata={roughness:0.3,metalness:0.05}; return m; })();
+      dome.position.y = 0.1;
+      g.add(dome);
+      // Brèche dans le dôme (état effondré) : un bloc sombre encastré.
+      const gap = mkBox(0.9,1.1,0.7, 0x1a2226, { roughness:0.6 });
+      gap.position.set(1.1,0.4,0.3);
+      g.add(gap);
+      const doorway = mkBox(0.8,1.3,0.6, 0x101418, { roughness:0.9 });
+      doorway.position.set(0,0.65,1.3);
+      g.add(doorway);
+      // Ossements gelés éparpillés à côté du dôme.
+      for(let i=0;i<4;i++){
+        const rib = mkCyl(0.05,0.07, 0.9+Math.random()*0.5, bone, 5);
+        rib.rotation.z = Math.PI/2 + (Math.random()-0.5)*0.6;
+        rib.position.set(1.8+Math.random()*1.2, 0.1, -0.8+Math.random()*1.6);
+        g.add(rib);
+      }
+      return g;
+    }
     scatterBuildings('temperate', buildForestCabin, 3);
     scatterBuildings('taiga', buildForestCabin, 2);
     scatterBuildings('mountain', buildMountainHut, 2);
@@ -2240,6 +2660,9 @@
     scatterBuildings('prairie', buildGrassFarmhouse, 2);
     scatterBuildings('swamp', buildSwampHut, 2);
     scatterBuildings('city', buildFuturisticTower, 3);
+    scatterBuildings('tropical', buildJungleTemple, 2);
+    scatterBuildings('savanna', buildSavannaCamp, 3);
+    scatterBuildings('tundra', buildIceShelter, 2);
 
     // ---- Repère visible de loin côté forêt : un arbre ancien
     // surdimensionné — aide à s'orienter en racontant le terrain
@@ -2265,6 +2688,312 @@
       obj.rotation.y = Math.random()*Math.PI*2;
       addBiomeObj(obj);
     });
+    // Un seul repère majeur existait (le chêne mort de la forêt tempérée) —
+    // les 10 autres biomes n'avaient RIEN de visible à grande distance pour
+    // s'orienter, malgré la demande explicite "1 point de repère majeur
+    // visible à grande distance" par biome. Un par biome manquant, chacun
+    // raconté par sa propre géologie/climat plutôt qu'un objet générique
+    // redimensionné.
+    placeLandmark('desert', (x,z,y)=>{
+      // Arche de grès — deux piliers érodés par le vent + un linteau posé
+      // dessus, jamais un arc parfaitement lisse (bords irréguliers via
+      // plusieurs blocs légèrement décalés).
+      const g = new BABYLON.TransformNode('grp', scene);
+      const stone = 0xc98f52;
+      const pillarH = 9+Math.random()*2, gap = 5+Math.random()*1.5;
+      [-1,1].forEach(side=>{
+        const p = mkBox(2.2, pillarH, 2.4, stone, { roughness:0.9 });
+        p.position.x = side*(gap/2+1.1);
+        g.add(p);
+      });
+      const lintel = mkBox(gap+4.6, 2.4, 2.6, stone, { roughness:0.9 });
+      lintel.position.y = pillarH+1.2;
+      g.add(lintel);
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('savanna', (x,z,y)=>{
+      // Baobab ancestral : tronc massif et court, canopée large et plate.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const trunkH = 7+Math.random()*2, trunkR = 2.4+Math.random()*0.6;
+      const trunk = mkCyl(trunkR*0.75, trunkR, trunkH, 0x7a6a4a, 9);
+      g.add(trunk);
+      const canopy = BABYLON.MeshBuilder.CreatePolyhedron('baobabCanopy', {type:3, size:trunkR*2.1}, scene);
+      canopy.scaling.set(1,0.42,1);
+      canopy.material = (()=>{ const m=new BABYLON.PBRMaterial('baobabCanopyMat', scene); m.albedoColor=hexToColor3(0x6a7a3a); m.roughness=0.95; m.metadata={roughness:0.95,metalness:0}; return m; })();
+      canopy.position.y = trunkH*0.98;
+      g.add(canopy);
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('tundra', (x,z,y)=>{
+      // Pic de glace dressé, fossile/ossement gelé encastré à sa base —
+      // relie le repère à "fossiles/ossements" demandés en micro-détails.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const spireH = 10+Math.random()*3;
+      const spire = mkCyl(0.3, 2.4+Math.random()*0.6, spireH, 0xcfe8f0, 7);
+      g.add(spire);
+      const rib = mkCyl(0.12,0.16, 2.6, 0xe8e2d0, 6);
+      rib.rotation.z = Math.PI/2;
+      rib.position.set(1.6, 0.3, 0.4);
+      g.add(rib);
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('taiga', (x,z,y)=>{
+      // Conifère ancestral, bien plus haut que la canopée environnante —
+      // dépouillé (dominant mort), silhouette reconnaissable de loin.
+      const trunkH = 13+Math.random()*3, trunkR = 0.55+Math.random()*0.15;
+      const trunk = mkCyl(0.1, trunkR, trunkH, 0x4a3a2c, 7);
+      trunk.position.set(x,y+trunkH/2,z); // base au niveau du sol (mkCyl centre par défaut sur sa demi-hauteur, jamais sur 0)
+      trunk.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(trunk);
+      // Quelques moignons de branches cassées le long du tronc.
+      for(let i=0;i<5;i++){
+        const branch = mkCyl(0.03,0.08, 0.8+Math.random()*0.6, 0x4a3a2c, 5);
+        branch.rotation.z = Math.PI/2.3*(Math.random()<0.5?1:-1);
+        branch.position.set(x, y+2+i*(trunkH-3)/5, z);
+        addBiomeObj(branch);
+      }
+    });
+    placeLandmark('mountain', (x,z,y)=>{
+      // Pic rocheux surmonté d'un petit cairn de pierres empilées —
+      // "sanctuaire perché" demandé, sans architecture complexe.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const peakH = 16+Math.random()*4;
+      const peak = mkCyl(0.4, 3.6+Math.random()*0.8, peakH, 0x847f70, 6);
+      g.add(peak);
+      let cairnY = peakH, cairnR = 0.65;
+      for(let i=0;i<4;i++){
+        const stone = BABYLON.MeshBuilder.CreatePolyhedron('cairn', {type:2, size:cairnR}, scene);
+        stone.material = (()=>{ const m=new BABYLON.StandardMaterial('cairnMat', scene); m.diffuseColor=hexToColor3(0x9a958a); m.specularColor=new BABYLON.Color3(0,0,0); return m; })();
+        stone.position.set((Math.random()-0.5)*0.2, cairnY+cairnR*0.7, (Math.random()-0.5)*0.2);
+        g.add(stone);
+        cairnY += cairnR*1.1; cairnR *= 0.72;
+      }
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('swamp', (x,z,y)=>{
+      // Mangrove géante et morte, racines noueuses largement exposées
+      // (échasses) au-dessus de la vase.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const wood = 0x3a3a2c;
+      const trunkH = 8+Math.random()*2;
+      const trunk = mkCyl(0.3, 0.9, trunkH, wood, 7);
+      g.add(trunk);
+      for(let i=0;i<7;i++){
+        const ang = (i/7)*Math.PI*2 + Math.random()*0.3;
+        const root = mkCyl(0.12,0.22, 2.6+Math.random()*1.2, wood, 6);
+        root.position.set(Math.cos(ang)*1.3, 0, Math.sin(ang)*1.3);
+        root.rotation.z = Math.cos(ang)*1.15; root.rotation.x = -Math.sin(ang)*1.15;
+        g.add(root);
+      }
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('canyon', (x,z,y)=>{
+      // Arche naturelle taillée par l'érosion — plus étroite et plus
+      // haute que celle du désert, grès rougeâtre distinct.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const stone = 0x9a5a3a;
+      const pillarH = 12+Math.random()*3, gap = 3+Math.random()*1;
+      [-1,1].forEach(side=>{
+        const p = mkCyl(1.3+Math.random()*0.3, 1.9, pillarH, stone, 8);
+        p.position.x = side*(gap/2+1.5);
+        g.add(p);
+      });
+      const lintel = mkBox(gap+5.5, 2.8, 2.2, stone, { roughness:0.92 });
+      lintel.position.y = pillarH+1.4;
+      lintel.rotation.z = (Math.random()-0.5)*0.05;
+      g.add(lintel);
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('prairie', (x,z,y)=>{
+      // Cercle de pierres (mégalithes) — demandé explicitement dans le
+      // brief ("cercles de pierres"), jamais vu ailleurs dans les biomes.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const count = 7+Math.floor(Math.random()*3), ringR = 3.6+Math.random()*0.8;
+      for(let i=0;i<count;i++){
+        const ang = (i/count)*Math.PI*2;
+        const slabH = 2.2+Math.random()*1;
+        const slab = mkBox(0.6, slabH, 0.35, 0x8a857a, { roughness:0.95 });
+        slab.position.set(Math.cos(ang)*ringR, slabH/2, Math.sin(ang)*ringR); // base au sol (mkBox centre par défaut sur sa demi-hauteur, jamais sur 0)
+        slab.rotation.y = ang;
+        slab.rotation.z = (Math.random()-0.5)*0.1;
+        g.add(slab);
+      }
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('tropical', (x,z,y)=>{
+      // Idole de pierre ancestrale noyée sous les lianes — distinct du
+      // temple à degrés (bâtiment secondaire) : un monolithe vertical
+      // unique, bien plus haut que la canopée.
+      const g = new BABYLON.TransformNode('grp', scene);
+      const stone = 0x5c6b52;
+      const h = 9+Math.random()*2.5;
+      const monolith = mkBox(1.8,h,1.4, stone, { roughness:0.97 });
+      g.add(monolith);
+      const head = BABYLON.MeshBuilder.CreatePolyhedron('idolHead', {type:2, size:1.3}, scene);
+      head.material = (()=>{ const m=new BABYLON.PBRMaterial('idolHeadMat', scene); m.albedoColor=hexToColor3(stone); m.roughness=0.95; m.metadata={roughness:0.95,metalness:0}; return m; })();
+      head.position.y = h*0.98;
+      g.add(head);
+      for(let i=0;i<6;i++){
+        const vine = mkCyl(0.04,0.05, 2+Math.random()*2.5, 0x3f6b32, 5);
+        vine.position.set((Math.random()-0.5)*1.6, h*(0.3+Math.random()*0.5), 0.75);
+        vine.rotation.x = 0.08*(Math.random()-0.5);
+        g.add(vine);
+      }
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+
+    // ---- Découvertes rares : grottes cachées, fossiles apparents, passages
+    // secrets, points de vue panoramiques — les 4 dernières catégories du
+    // brief de décoration, aucune encore présente. Toujours 1 par biome
+    // concerné (jamais systématique), sur le même principe que
+    // placeLandmark : on tire plusieurs candidats et on garde le meilleur.
+    function placeHighPoint(biomeName, build){
+      // Variante de placeLandmark qui privilégie un point RÉELLEMENT haut
+      // du relief (nécessaire pour un "point de vue" — placeLandmark seul
+      // ne regarde que l'appartenance au biome, jamais l'altitude).
+      let best=null, bestH=-Infinity;
+      for(let i=0;i<24;i++){
+        const theta = Math.random()*Math.PI*2;
+        const innerR = squareEdgeR(theta);
+        const r = innerR + EDGE_BLEND + 60 + Math.random()*(OUTER_R-innerR-EDGE_BLEND-100);
+        const x = Math.cos(theta)*r, z = Math.sin(theta)*r;
+        const w = biomeWeights(theta);
+        if(w[biomeName] < 0.35) continue; // doit être franchement dans le bon biome, pas juste en bordure
+        const h = terrainSample(x,z).height;
+        if(h>bestH){ bestH=h; best={x,z}; }
+      }
+      if(best) build(best.x, best.z, terrainSample(best.x,best.z).height);
+    }
+    // Grotte cachée : façade rocheuse assemblée de blocs irréguliers +
+    // bouche sombre. Couleur de roche adaptée par biome (glace en toundra,
+    // grès rouge en canyon, roche grise en montagne).
+    function hiddenCaveBuilder(rockCol){
+      return (x,z,y)=>{
+        const g = new BABYLON.TransformNode('grp', scene);
+        for(let i=0;i<5;i++){
+          const bw = 2+Math.random()*1.6, bh = 3+Math.random()*2.5, bd = 1.6+Math.random()*1.2;
+          const blk = mkBox(bw,bh,bd, rockCol, { roughness:0.95 });
+          blk.position.x = (i-2)*1.8+(Math.random()-0.5)*0.6;
+          blk.position.z = (Math.random()-0.5)*0.8;
+          g.add(blk); // Y laissé tel quel (mkBox pose déjà la base au sol)
+        }
+        const mouthH = 2.2+Math.random()*0.6;
+        const mouth = mkBox(1.6, mouthH, 1.5, 0x0a0a0a, { roughness:1 });
+        mouth.position.x = 0; mouth.position.z = 0.9;
+        g.add(mouth);
+        g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+        addBiomeObj(g);
+      };
+    }
+    placeLandmark('mountain', hiddenCaveBuilder(0x7a756a));
+    placeLandmark('canyon', hiddenCaveBuilder(0x8a5a3a));
+    placeLandmark('tundra', hiddenCaveBuilder(0xc7d8dc));
+    // Fossile apparent : cage thoracique en arc (côtes courbées, à peine
+    // dégagées du sol/sable) + crâne partiellement exposé à une extrémité —
+    // toujours "en cours de dégagement", jamais un squelette complet monté.
+    function fossilSiteBuilder(boneCol){
+      return (x,z,y)=>{
+        const g = new BABYLON.TransformNode('grp', scene);
+        const ribCount = 6+Math.floor(Math.random()*3);
+        for(let i=0;i<ribCount;i++){
+          const t = ribCount>1 ? i/(ribCount-1) : 0.5;
+          const ang = (t-0.5)*Math.PI*0.8;
+          const ribLen = 1.6+Math.random()*0.6;
+          const rib = mkCyl(0.06,0.09, ribLen, boneCol, 6);
+          rib.position.x = Math.sin(ang)*0.15;
+          rib.position.z = t*3.2-1.6;
+          rib.position.y = ribLen*0.12; // affleure à peine — fossile encore largement enfoui, jamais déterré en entier
+          rib.rotation.z = Math.PI/2 - ang*0.3;
+          g.add(rib);
+        }
+        const skull = BABYLON.MeshBuilder.CreatePolyhedron('skull', {type:1, size:0.55}, scene);
+        skull.material = (()=>{ const m=new BABYLON.PBRMaterial('skullMat', scene); m.albedoColor=hexToColor3(boneCol); m.roughness=0.85; m.metadata={roughness:0.85,metalness:0}; return m; })();
+        skull.position.set(0, 0.22, -2.1);
+        g.add(skull);
+        g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+        addBiomeObj(g);
+      };
+    }
+    placeLandmark('desert', fossilSiteBuilder(0xe8dcb8));
+    placeLandmark('canyon', fossilSiteBuilder(0xd8d0c0));
+    // Passage secret : montagne (crevasse étroite entre deux parois qui
+    // laisse deviner un chemin cassé) et tropical (ouverture dissimulée
+    // derrière un rideau de lianes denses) — jamais une porte ou un
+    // mécanisme visible, juste une anomalie du terrain qui invite à
+    // s'y faufiler.
+    placeLandmark('mountain', (x,z,y)=>{
+      const g = new BABYLON.TransformNode('grp', scene);
+      const stone = 0x847f70;
+      [-1,1].forEach(side=>{
+        const wallH = 6+Math.random()*2, wallW = 1.8+Math.random()*0.6;
+        const wall = mkBox(wallW, wallH, 3+Math.random()*1, stone, { roughness:0.96 });
+        wall.position.x = side*(0.6+Math.random()*0.2);
+        g.add(wall);
+      });
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    placeLandmark('tropical', (x,z,y)=>{
+      const g = new BABYLON.TransformNode('grp', scene);
+      const stone = 0x5c6b52;
+      const wallH = 5+Math.random()*1.5, wallW = 4+Math.random()*1;
+      const wall = mkBox(wallW, wallH, 1.2, stone, { roughness:0.96 });
+      g.add(wall);
+      const gapH = wallH*0.6;
+      const gap = mkBox(1.2, gapH, 1.4, 0x0a0a0a, { roughness:1 });
+      gap.position.z = 0.4;
+      g.add(gap);
+      for(let i=0;i<10;i++){
+        const vine = mkCyl(0.04,0.04, wallH*0.75+Math.random()*0.5, 0x3f6b32, 5);
+        vine.position.x = -wallW*0.3+i*(wallW*0.6/9);
+        vine.position.z = 0.85;
+        g.add(vine);
+      }
+      g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+      addBiomeObj(g);
+    });
+    // Point de vue panoramique : petite plateforme en bois en surplomb,
+    // toujours calée sur le point RÉELLEMENT le plus haut du secteur (voir
+    // placeHighPoint) — sans ça, "vue panoramique" n'aurait aucun sens.
+    function viewpointBuilder(){
+      return (x,z,y)=>{
+        const g = new BABYLON.TransformNode('grp', scene);
+        const wood = 0x6b4a2e, stone = 0x8a857a;
+        const deckW = 2.6+Math.random()*0.6, deckD = 2.2+Math.random()*0.5, deckH = 0.15;
+        const deck = mkBox(deckW, deckH, deckD, wood, { roughness:0.9 });
+        g.add(deck);
+        const postH = 1.0;
+        [-1,1].forEach(side=>{
+          const post = mkCyl(0.06,0.06, postH, wood, 6);
+          post.position.set(side*deckW*0.42, deckH+postH/2, deckD/2-0.1);
+          g.add(post);
+        });
+        const rail = mkBox(deckW*0.86, 0.08, 0.08, wood);
+        rail.position.set(0, deckH+postH-0.04, deckD/2-0.1);
+        g.add(rail);
+        // Étais de pierre soutenant la plateforme en surplomb (belvédère
+        // accroché au relief, pas posé sur du plat).
+        for(let i=0;i<3;i++){
+          const suppH = 1+Math.random()*0.8;
+          const supp = mkBox(0.5, suppH, 0.5, stone);
+          supp.position.set((i-1)*0.8, -suppH/2, deckD/2-0.3);
+          g.add(supp);
+        }
+        g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+        addBiomeObj(g);
+      };
+    }
+    placeHighPoint('mountain', viewpointBuilder());
+    placeHighPoint('canyon', viewpointBuilder());
+    placeHighPoint('taiga', viewpointBuilder());
   }
   applyBiome('mixed', true); // biome par défaut au premier chargement (skipMarker : une carte neuve n'a pas encore de marqueur à poser)
 
@@ -3451,7 +4180,14 @@
     refreshInspectorValues(); updateSelectionBoxes(); markShadowsDirty();
   }
   // Affichage : grille / interface / filaire / boîtes de collision
-  function toggleGridVisibility(){ grid.visible = !grid.visible; }
+  function toggleGridVisibility(){
+    grid.visible = !grid.visible;
+    // Garde la case de l'espace créateur (panneau Environnement) en phase
+    // avec le raccourci clavier G — les deux doivent piloter le même état.
+    const cb = document.getElementById('gridToggle');
+    if(cb) cb.checked = grid.visible;
+  }
+  document.getElementById('gridToggle').addEventListener('change', (e)=>{ grid.visible = e.target.checked; });
   function toggleUIVisibility(){ document.getElementById('app').classList.toggle('ui-hidden'); }
   let wireframeOn = false;
   function toggleWireframe(){
@@ -4358,23 +5094,13 @@
   document.getElementById('clearBtn').addEventListener('click', ()=> clearMap(true));
   updateFileStatus();
 
-  // Restauration automatique de la dernière session, pour ne pas perdre le
-  // travail entre deux ouvertures du fichier. On lit IndexedDB en priorité ;
-  // si une ancienne sauvegarde traîne encore dans localStorage (avant ce
-  // changement), on la reprend une fois puis on la migre vers IndexedDB.
-  (async ()=>{
-    try{
-      let autosave = await idbGet(MAP_KEY);
-      if(!autosave){
-        const legacy = localStorage.getItem(MAP_KEY);
-        if(legacy){
-          autosave = legacy;
-          idbSet(MAP_KEY, legacy).then(()=> localStorage.removeItem(MAP_KEY)).catch(()=>{});
-        }
-      }
-      if(autosave) loadMapFromJson(autosave);
-    }catch(err){ console.warn('Restauration de la session impossible :', err); }
-  })();
+  // Pas de restauration automatique de la dernière session : la carte
+  // démarre TOUJOURS vide à l'ouverture, l'import se fait à la main
+  // (bouton Charger) — demande explicite, l'auto-restauration surprenait
+  // plus qu'elle n'aidait. L'autosave écrite plus bas (beforeunload) et
+  // lors des sauvegardes explicites reste en place comme filet de
+  // sécurité (récupération manuelle possible depuis IndexedDB en cas de
+  // crash), simplement plus rechargée automatiquement.
   window.addEventListener('beforeunload', ()=>{
     if(placedObjects.length) persistMapAutosave(serializeMap());
   });
@@ -4433,14 +5159,11 @@
     requestAnimationFrame(animate);
   }
   requestAnimationFrame(animate);
-
-  const loadingEl = document.getElementById('loading');
-  setTimeout(()=>{
-    loadingEl.style.opacity='0';
-    setTimeout(()=> loadingEl.remove(), 400);
-  }, 300);
-
-})();
+  // L'écran de chargement (barre à 100% + masquage) est géré par le
+  // chargeur tout en haut du fichier, juste après l'appel à cette
+  // fonction — pas ici, pour que "100%" et "tout s'affiche" coïncident
+  // exactement (voir son commentaire).
+}
 </script>
 </body>
 </html>

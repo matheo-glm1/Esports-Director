@@ -230,17 +230,28 @@ function applyDailyFatigueRecovery(gameId){
 // Comportement IA : pendant une fenêtre de transferts ouverte, les équipes
 // rivales comblent progressivement leurs postes vacants pour atteindre
 // l'effectif minimum avant le verrouillage — priorité aux postes manquants.
+// EXCEPTION "effectif critique" (sous MIN_ROSTER_SIZE, ex. 4/5 à Valostrike) :
+// autorisée même fenêtre fermée / split verrouillé, avec une urgence bien
+// plus élevée (0.7 au lieu de 0.25/jour) — exactement le même principe que
+// le "remplacement pour blessure" déjà accordé au joueur (voir en tête de
+// fichier), pour ne jamais laisser une IA rivale rester bloquée à 4 joueurs
+// pendant tout un split faute de fenêtre ouverte (bug signalé : des
+// structures rivales disputaient leurs matchs sous l'effectif minimum).
 function aiRefillRosterIfNeeded(gameId){
-  if(!isTransferWindowOpen(gameId)) return;
   const roles = GAMES[gameId].roles;
+  const minSize = MIN_ROSTER_SIZE[gameId] || roles.length;
+  const windowOpen = isTransferWindowOpen(gameId);
   (state.standings[gameId]||[]).filter(t=>!t.self).forEach(team=>{
     team.roster = team.roster || [];
     if(team.roster.length >= roles.length) return;
+    const belowMinimum = team.roster.length < minSize;
+    if(!windowOpen && !belowMinimum) return; // pas encore complet mais jouable, et fenêtre fermée : on attend la réouverture, comme avant
     const filledRoles = team.roster.map(p=>p.role);
     const missingRoles = roles.filter(r=> !filledRoles.includes(r));
     missingRoles.forEach(role=>{
       if(team.roster.length >= roles.length) return;
-      if(Math.random() < 0.25) scheduleAiHire(gameId, team.name, 'player', role);
+      const chance = belowMinimum ? 0.7 : 0.25;
+      if(Math.random() < chance) scheduleAiHire(gameId, team.name, 'player', role);
     });
   });
 }
@@ -1162,32 +1173,210 @@ function isBettingSponsor(name){ return SPONSOR_BETTING_POOL.includes(name); }
 // explicitement). `key` sert de code partout ailleurs dans le jeu (state.
 // org.country, SPONSOR_COUNTRIES lui-même) et diffère de l'ISO réel
 // uniquement pour le Royaume-Uni ('uk' ici, vrai code ISO 'gb').
+// Liste quasi complète des pays reconnus (~195, demandé explicitement —
+// "il manque plein de pays") plutôt qu'une sélection restreinte de départ.
+// `gamblingAd` est une classification indicative (pas une veille juridique
+// exhaustive pays par pays) qui sert uniquement à moduler le risque d'un
+// partenariat avec un sponsor de paris sportifs, voir
+// applyBettingSponsorConsequence — jamais un blocage.
 const SPONSOR_COUNTRIES = [
-  { key:'fr', label:'France',                 flagIso:'fr', gamblingAd:'restreint' },
-  { key:'be', label:'Belgique',                flagIso:'be', gamblingAd:'restreint' },
-  { key:'it', label:'Italie',                  flagIso:'it', gamblingAd:'interdit' },
-  { key:'es', label:'Espagne',                 flagIso:'es', gamblingAd:'restreint' },
-  { key:'uk', label:'Royaume-Uni',             flagIso:'gb', gamblingAd:'libre' },
+  { key:'af', label:'Afghanistan',             flagIso:'af', gamblingAd:'interdit' },
+  { key:'za', label:'Afrique du Sud',          flagIso:'za', gamblingAd:'restreint' },
+  { key:'al', label:'Albanie',                 flagIso:'al', gamblingAd:'restreint' },
+  { key:'dz', label:'Algérie',                 flagIso:'dz', gamblingAd:'interdit' },
   { key:'de', label:'Allemagne',               flagIso:'de', gamblingAd:'restreint' },
-  { key:'nl', label:'Pays-Bas',                flagIso:'nl', gamblingAd:'restreint' },
-  { key:'pt', label:'Portugal',                flagIso:'pt', gamblingAd:'restreint' },
-  { key:'se', label:'Suède',                   flagIso:'se', gamblingAd:'restreint' },
-  { key:'dk', label:'Danemark',                flagIso:'dk', gamblingAd:'libre' },
-  { key:'no', label:'Norvège',                 flagIso:'no', gamblingAd:'interdit' },
-  { key:'pl', label:'Pologne',                 flagIso:'pl', gamblingAd:'restreint' },
-  { key:'tr', label:'Turquie',                 flagIso:'tr', gamblingAd:'interdit' },
-  { key:'us', label:'États-Unis',              flagIso:'us', gamblingAd:'libre' },
-  { key:'ca', label:'Canada',                  flagIso:'ca', gamblingAd:'libre' },
-  { key:'br', label:'Brésil',                  flagIso:'br', gamblingAd:'libre' },
-  { key:'mx', label:'Mexique',                 flagIso:'mx', gamblingAd:'libre' },
-  { key:'ar', label:'Argentine',               flagIso:'ar', gamblingAd:'libre' },
-  { key:'kr', label:'Corée du Sud',            flagIso:'kr', gamblingAd:'interdit' },
-  { key:'jp', label:'Japon',                   flagIso:'jp', gamblingAd:'interdit' },
-  { key:'cn', label:'Chine',                   flagIso:'cn', gamblingAd:'interdit' },
+  { key:'ad', label:'Andorre',                 flagIso:'ad', gamblingAd:'restreint' },
+  { key:'ao', label:'Angola',                  flagIso:'ao', gamblingAd:'libre' },
+  { key:'ag', label:'Antigua-et-Barbuda',      flagIso:'ag', gamblingAd:'libre' },
   { key:'sa', label:'Arabie Saoudite',         flagIso:'sa', gamblingAd:'interdit' },
-  { key:'ae', label:'Émirats Arabes Unis',     flagIso:'ae', gamblingAd:'interdit' },
-  { key:'in', label:'Inde',                    flagIso:'in', gamblingAd:'restreint' },
+  { key:'ar', label:'Argentine',               flagIso:'ar', gamblingAd:'libre' },
+  { key:'am', label:'Arménie',                 flagIso:'am', gamblingAd:'restreint' },
   { key:'au', label:'Australie',               flagIso:'au', gamblingAd:'restreint' },
+  { key:'at', label:'Autriche',                flagIso:'at', gamblingAd:'restreint' },
+  { key:'az', label:'Azerbaïdjan',             flagIso:'az', gamblingAd:'restreint' },
+  { key:'bs', label:'Bahamas',                 flagIso:'bs', gamblingAd:'libre' },
+  { key:'bh', label:'Bahreïn',                 flagIso:'bh', gamblingAd:'interdit' },
+  { key:'bd', label:'Bangladesh',              flagIso:'bd', gamblingAd:'interdit' },
+  { key:'bb', label:'Barbade',                 flagIso:'bb', gamblingAd:'libre' },
+  { key:'be', label:'Belgique',                flagIso:'be', gamblingAd:'restreint' },
+  { key:'bz', label:'Belize',                  flagIso:'bz', gamblingAd:'libre' },
+  { key:'bj', label:'Bénin',                   flagIso:'bj', gamblingAd:'libre' },
+  { key:'bt', label:'Bhoutan',                 flagIso:'bt', gamblingAd:'interdit' },
+  { key:'by', label:'Biélorussie',             flagIso:'by', gamblingAd:'interdit' },
+  { key:'bo', label:'Bolivie',                 flagIso:'bo', gamblingAd:'restreint' },
+  { key:'ba', label:'Bosnie-Herzégovine',      flagIso:'ba', gamblingAd:'restreint' },
+  { key:'bw', label:'Botswana',                flagIso:'bw', gamblingAd:'restreint' },
+  { key:'br', label:'Brésil',                  flagIso:'br', gamblingAd:'libre' },
+  { key:'bn', label:'Brunei',                  flagIso:'bn', gamblingAd:'interdit' },
+  { key:'bg', label:'Bulgarie',                flagIso:'bg', gamblingAd:'restreint' },
+  { key:'bf', label:'Burkina Faso',            flagIso:'bf', gamblingAd:'libre' },
+  { key:'bi', label:'Burundi',                 flagIso:'bi', gamblingAd:'libre' },
+  { key:'kh', label:'Cambodge',                flagIso:'kh', gamblingAd:'restreint' },
+  { key:'cm', label:'Cameroun',                flagIso:'cm', gamblingAd:'libre' },
+  { key:'ca', label:'Canada',                  flagIso:'ca', gamblingAd:'libre' },
+  { key:'cv', label:'Cap-Vert',                flagIso:'cv', gamblingAd:'libre' },
+  { key:'cl', label:'Chili',                   flagIso:'cl', gamblingAd:'libre' },
+  { key:'cn', label:'Chine',                   flagIso:'cn', gamblingAd:'interdit' },
+  { key:'cy', label:'Chypre',                  flagIso:'cy', gamblingAd:'restreint' },
+  { key:'co', label:'Colombie',                flagIso:'co', gamblingAd:'libre' },
+  { key:'km', label:'Comores',                 flagIso:'km', gamblingAd:'interdit' },
+  { key:'cg', label:'Congo',                   flagIso:'cg', gamblingAd:'libre' },
+  { key:'kp', label:'Corée du Nord',           flagIso:'kp', gamblingAd:'interdit' },
+  { key:'kr', label:'Corée du Sud',            flagIso:'kr', gamblingAd:'interdit' },
+  { key:'cr', label:'Costa Rica',              flagIso:'cr', gamblingAd:'libre' },
+  { key:'ci', label:"Côte d'Ivoire",           flagIso:'ci', gamblingAd:'libre' },
+  { key:'hr', label:'Croatie',                 flagIso:'hr', gamblingAd:'restreint' },
+  { key:'cu', label:'Cuba',                    flagIso:'cu', gamblingAd:'interdit' },
+  { key:'dk', label:'Danemark',                flagIso:'dk', gamblingAd:'libre' },
+  { key:'dj', label:'Djibouti',                flagIso:'dj', gamblingAd:'interdit' },
+  { key:'dm', label:'Dominique',               flagIso:'dm', gamblingAd:'libre' },
+  { key:'eg', label:'Égypte',                  flagIso:'eg', gamblingAd:'interdit' },
+  { key:'ae', label:'Émirats Arabes Unis',     flagIso:'ae', gamblingAd:'interdit' },
+  { key:'ec', label:'Équateur',                flagIso:'ec', gamblingAd:'restreint' },
+  { key:'er', label:'Érythrée',                flagIso:'er', gamblingAd:'interdit' },
+  { key:'es', label:'Espagne',                 flagIso:'es', gamblingAd:'restreint' },
+  { key:'sz', label:'Eswatini',                flagIso:'sz', gamblingAd:'restreint' },
+  { key:'ee', label:'Estonie',                 flagIso:'ee', gamblingAd:'restreint' },
+  { key:'us', label:'États-Unis',              flagIso:'us', gamblingAd:'libre' },
+  { key:'et', label:'Éthiopie',                flagIso:'et', gamblingAd:'restreint' },
+  { key:'fj', label:'Fidji',                   flagIso:'fj', gamblingAd:'libre' },
+  { key:'fi', label:'Finlande',                flagIso:'fi', gamblingAd:'restreint' },
+  { key:'fr', label:'France',                  flagIso:'fr', gamblingAd:'restreint' },
+  { key:'ga', label:'Gabon',                   flagIso:'ga', gamblingAd:'libre' },
+  { key:'gm', label:'Gambie',                  flagIso:'gm', gamblingAd:'restreint' },
+  { key:'ge', label:'Géorgie',                 flagIso:'ge', gamblingAd:'restreint' },
+  { key:'gh', label:'Ghana',                   flagIso:'gh', gamblingAd:'libre' },
+  { key:'gr', label:'Grèce',                   flagIso:'gr', gamblingAd:'restreint' },
+  { key:'gd', label:'Grenade',                 flagIso:'gd', gamblingAd:'libre' },
+  { key:'gt', label:'Guatemala',               flagIso:'gt', gamblingAd:'restreint' },
+  { key:'gn', label:'Guinée',                  flagIso:'gn', gamblingAd:'libre' },
+  { key:'gq', label:'Guinée équatoriale',      flagIso:'gq', gamblingAd:'restreint' },
+  { key:'gw', label:'Guinée-Bissau',           flagIso:'gw', gamblingAd:'libre' },
+  { key:'gy', label:'Guyana',                  flagIso:'gy', gamblingAd:'libre' },
+  { key:'ht', label:'Haïti',                   flagIso:'ht', gamblingAd:'restreint' },
+  { key:'hn', label:'Honduras',                flagIso:'hn', gamblingAd:'restreint' },
+  { key:'hu', label:'Hongrie',                 flagIso:'hu', gamblingAd:'restreint' },
+  { key:'mh', label:'Îles Marshall',           flagIso:'mh', gamblingAd:'libre' },
+  { key:'sb', label:'Îles Salomon',            flagIso:'sb', gamblingAd:'libre' },
+  { key:'in', label:'Inde',                    flagIso:'in', gamblingAd:'restreint' },
+  { key:'id', label:'Indonésie',               flagIso:'id', gamblingAd:'interdit' },
+  { key:'iq', label:'Irak',                    flagIso:'iq', gamblingAd:'interdit' },
+  { key:'ir', label:'Iran',                    flagIso:'ir', gamblingAd:'interdit' },
+  { key:'ie', label:'Irlande',                 flagIso:'ie', gamblingAd:'libre' },
+  { key:'is', label:'Islande',                 flagIso:'is', gamblingAd:'restreint' },
+  { key:'il', label:'Israël',                  flagIso:'il', gamblingAd:'restreint' },
+  { key:'it', label:'Italie',                  flagIso:'it', gamblingAd:'interdit' },
+  { key:'jm', label:'Jamaïque',                flagIso:'jm', gamblingAd:'libre' },
+  { key:'jp', label:'Japon',                   flagIso:'jp', gamblingAd:'interdit' },
+  { key:'jo', label:'Jordanie',                flagIso:'jo', gamblingAd:'interdit' },
+  { key:'kz', label:'Kazakhstan',              flagIso:'kz', gamblingAd:'restreint' },
+  { key:'ke', label:'Kenya',                   flagIso:'ke', gamblingAd:'restreint' },
+  { key:'kg', label:'Kirghizistan',            flagIso:'kg', gamblingAd:'restreint' },
+  { key:'ki', label:'Kiribati',                flagIso:'ki', gamblingAd:'libre' },
+  { key:'xk', label:'Kosovo',                  flagIso:'xk', gamblingAd:'restreint' },
+  { key:'kw', label:'Koweït',                  flagIso:'kw', gamblingAd:'interdit' },
+  { key:'la', label:'Laos',                    flagIso:'la', gamblingAd:'restreint' },
+  { key:'ls', label:'Lesotho',                 flagIso:'ls', gamblingAd:'restreint' },
+  { key:'lv', label:'Lettonie',                flagIso:'lv', gamblingAd:'restreint' },
+  { key:'lb', label:'Liban',                   flagIso:'lb', gamblingAd:'restreint' },
+  { key:'lr', label:'Libéria',                 flagIso:'lr', gamblingAd:'libre' },
+  { key:'ly', label:'Libye',                   flagIso:'ly', gamblingAd:'interdit' },
+  { key:'li', label:'Liechtenstein',           flagIso:'li', gamblingAd:'restreint' },
+  { key:'lt', label:'Lituanie',                flagIso:'lt', gamblingAd:'restreint' },
+  { key:'lu', label:'Luxembourg',              flagIso:'lu', gamblingAd:'restreint' },
+  { key:'mk', label:'Macédoine du Nord',       flagIso:'mk', gamblingAd:'restreint' },
+  { key:'mg', label:'Madagascar',              flagIso:'mg', gamblingAd:'libre' },
+  { key:'my', label:'Malaisie',                flagIso:'my', gamblingAd:'interdit' },
+  { key:'mw', label:'Malawi',                  flagIso:'mw', gamblingAd:'restreint' },
+  { key:'mv', label:'Maldives',                flagIso:'mv', gamblingAd:'interdit' },
+  { key:'ml', label:'Mali',                    flagIso:'ml', gamblingAd:'interdit' },
+  { key:'mt', label:'Malte',                   flagIso:'mt', gamblingAd:'libre' },
+  { key:'ma', label:'Maroc',                   flagIso:'ma', gamblingAd:'interdit' },
+  { key:'mu', label:'Maurice',                 flagIso:'mu', gamblingAd:'libre' },
+  { key:'mr', label:'Mauritanie',              flagIso:'mr', gamblingAd:'interdit' },
+  { key:'mx', label:'Mexique',                 flagIso:'mx', gamblingAd:'libre' },
+  { key:'fm', label:'Micronésie',              flagIso:'fm', gamblingAd:'libre' },
+  { key:'md', label:'Moldavie',                flagIso:'md', gamblingAd:'restreint' },
+  { key:'mc', label:'Monaco',                  flagIso:'mc', gamblingAd:'restreint' },
+  { key:'mn', label:'Mongolie',                flagIso:'mn', gamblingAd:'restreint' },
+  { key:'me', label:'Monténégro',              flagIso:'me', gamblingAd:'restreint' },
+  { key:'mz', label:'Mozambique',              flagIso:'mz', gamblingAd:'libre' },
+  { key:'mm', label:'Myanmar',                 flagIso:'mm', gamblingAd:'interdit' },
+  { key:'na', label:'Namibie',                 flagIso:'na', gamblingAd:'libre' },
+  { key:'nr', label:'Nauru',                   flagIso:'nr', gamblingAd:'libre' },
+  { key:'np', label:'Népal',                   flagIso:'np', gamblingAd:'restreint' },
+  { key:'ni', label:'Nicaragua',               flagIso:'ni', gamblingAd:'restreint' },
+  { key:'ne', label:'Niger',                   flagIso:'ne', gamblingAd:'interdit' },
+  { key:'ng', label:'Nigeria',                 flagIso:'ng', gamblingAd:'restreint' },
+  { key:'no', label:'Norvège',                 flagIso:'no', gamblingAd:'interdit' },
+  { key:'nz', label:'Nouvelle-Zélande',        flagIso:'nz', gamblingAd:'libre' },
+  { key:'om', label:'Oman',                    flagIso:'om', gamblingAd:'interdit' },
+  { key:'ug', label:'Ouganda',                 flagIso:'ug', gamblingAd:'restreint' },
+  { key:'uz', label:'Ouzbékistan',             flagIso:'uz', gamblingAd:'interdit' },
+  { key:'pk', label:'Pakistan',                flagIso:'pk', gamblingAd:'interdit' },
+  { key:'pw', label:'Palaos',                  flagIso:'pw', gamblingAd:'libre' },
+  { key:'ps', label:'Palestine',               flagIso:'ps', gamblingAd:'interdit' },
+  { key:'pa', label:'Panama',                  flagIso:'pa', gamblingAd:'libre' },
+  { key:'pg', label:'Papouasie-Nouvelle-Guinée', flagIso:'pg', gamblingAd:'restreint' },
+  { key:'py', label:'Paraguay',                flagIso:'py', gamblingAd:'libre' },
+  { key:'nl', label:'Pays-Bas',                flagIso:'nl', gamblingAd:'restreint' },
+  { key:'pe', label:'Pérou',                   flagIso:'pe', gamblingAd:'libre' },
+  { key:'ph', label:'Philippines',             flagIso:'ph', gamblingAd:'libre' },
+  { key:'pl', label:'Pologne',                 flagIso:'pl', gamblingAd:'restreint' },
+  { key:'pt', label:'Portugal',                flagIso:'pt', gamblingAd:'restreint' },
+  { key:'qa', label:'Qatar',                   flagIso:'qa', gamblingAd:'interdit' },
+  { key:'cf', label:'République centrafricaine', flagIso:'cf', gamblingAd:'libre' },
+  { key:'cd', label:'République démocratique du Congo', flagIso:'cd', gamblingAd:'libre' },
+  { key:'do', label:'République dominicaine', flagIso:'do', gamblingAd:'libre' },
+  { key:'cz', label:'République tchèque',      flagIso:'cz', gamblingAd:'restreint' },
+  { key:'ro', label:'Roumanie',                flagIso:'ro', gamblingAd:'restreint' },
+  { key:'uk', label:'Royaume-Uni',             flagIso:'gb', gamblingAd:'libre' },
+  { key:'ru', label:'Russie',                  flagIso:'ru', gamblingAd:'restreint' },
+  { key:'rw', label:'Rwanda',                  flagIso:'rw', gamblingAd:'restreint' },
+  { key:'kn', label:'Saint-Kitts-et-Nevis',    flagIso:'kn', gamblingAd:'libre' },
+  { key:'sm', label:'Saint-Marin',             flagIso:'sm', gamblingAd:'restreint' },
+  { key:'vc', label:'Saint-Vincent-et-les-Grenadines', flagIso:'vc', gamblingAd:'libre' },
+  { key:'lc', label:'Sainte-Lucie',            flagIso:'lc', gamblingAd:'libre' },
+  { key:'sv', label:'Salvador',                flagIso:'sv', gamblingAd:'restreint' },
+  { key:'ws', label:'Samoa',                   flagIso:'ws', gamblingAd:'libre' },
+  { key:'st', label:'São Tomé-et-Principe',    flagIso:'st', gamblingAd:'libre' },
+  { key:'sn', label:'Sénégal',                 flagIso:'sn', gamblingAd:'restreint' },
+  { key:'rs', label:'Serbie',                  flagIso:'rs', gamblingAd:'restreint' },
+  { key:'sc', label:'Seychelles',              flagIso:'sc', gamblingAd:'libre' },
+  { key:'sl', label:'Sierra Leone',            flagIso:'sl', gamblingAd:'libre' },
+  { key:'sg', label:'Singapour',               flagIso:'sg', gamblingAd:'restreint' },
+  { key:'sk', label:'Slovaquie',               flagIso:'sk', gamblingAd:'restreint' },
+  { key:'si', label:'Slovénie',                flagIso:'si', gamblingAd:'restreint' },
+  { key:'so', label:'Somalie',                 flagIso:'so', gamblingAd:'interdit' },
+  { key:'sd', label:'Soudan',                  flagIso:'sd', gamblingAd:'interdit' },
+  { key:'ss', label:'Soudan du Sud',           flagIso:'ss', gamblingAd:'restreint' },
+  { key:'lk', label:'Sri Lanka',               flagIso:'lk', gamblingAd:'restreint' },
+  { key:'se', label:'Suède',                   flagIso:'se', gamblingAd:'restreint' },
+  { key:'ch', label:'Suisse',                  flagIso:'ch', gamblingAd:'restreint' },
+  { key:'sr', label:'Suriname',                flagIso:'sr', gamblingAd:'libre' },
+  { key:'sy', label:'Syrie',                   flagIso:'sy', gamblingAd:'interdit' },
+  { key:'tj', label:'Tadjikistan',             flagIso:'tj', gamblingAd:'restreint' },
+  { key:'tw', label:'Taïwan',                  flagIso:'tw', gamblingAd:'restreint' },
+  { key:'tz', label:'Tanzanie',                flagIso:'tz', gamblingAd:'restreint' },
+  { key:'td', label:'Tchad',                   flagIso:'td', gamblingAd:'restreint' },
+  { key:'th', label:'Thaïlande',               flagIso:'th', gamblingAd:'interdit' },
+  { key:'tl', label:'Timor oriental',          flagIso:'tl', gamblingAd:'libre' },
+  { key:'tg', label:'Togo',                    flagIso:'tg', gamblingAd:'libre' },
+  { key:'to', label:'Tonga',                   flagIso:'to', gamblingAd:'libre' },
+  { key:'tt', label:'Trinité-et-Tobago',       flagIso:'tt', gamblingAd:'libre' },
+  { key:'tn', label:'Tunisie',                 flagIso:'tn', gamblingAd:'interdit' },
+  { key:'tm', label:'Turkménistan',            flagIso:'tm', gamblingAd:'interdit' },
+  { key:'tr', label:'Turquie',                 flagIso:'tr', gamblingAd:'interdit' },
+  { key:'tv', label:'Tuvalu',                  flagIso:'tv', gamblingAd:'libre' },
+  { key:'ua', label:'Ukraine',                 flagIso:'ua', gamblingAd:'restreint' },
+  { key:'uy', label:'Uruguay',                 flagIso:'uy', gamblingAd:'libre' },
+  { key:'vu', label:'Vanuatu',                 flagIso:'vu', gamblingAd:'libre' },
+  { key:'va', label:'Vatican',                 flagIso:'va', gamblingAd:'interdit' },
+  { key:'ve', label:'Venezuela',               flagIso:'ve', gamblingAd:'restreint' },
+  { key:'vn', label:'Vietnam',                 flagIso:'vn', gamblingAd:'restreint' },
+  { key:'ye', label:'Yémen',                   flagIso:'ye', gamblingAd:'interdit' },
+  { key:'zm', label:'Zambie',                  flagIso:'zm', gamblingAd:'restreint' },
+  { key:'zw', label:'Zimbabwe',                flagIso:'zw', gamblingAd:'restreint' },
 ];
 function sponsorCountry(){
   return SPONSOR_COUNTRIES.find(c=>c.key===(state.org && state.org.country)) || SPONSOR_COUNTRIES[0];
@@ -1407,6 +1596,7 @@ function migrateLegacySaveIfNeeded(){
 function defaultState(){
   return {
     org:{ name:'', tag:'', color:COLOR_SWATCHES[0] },
+    ceo:{ name:'', avatar:CEO_AVATARS[0] }, // profil du manager (le joueur), voir createOrganization — distinct de state.managers (le staff embauché)
     budget:100000,
     reputation:20,
     supporters:0, // valeur réelle fixée à la création (voir STARTING_DIFFICULTY_LEVELS.supportersRange, createOrganization) — 0 ici n'est qu'un repli de sécurité
@@ -1936,6 +2126,9 @@ async function loadState(){
     // "Continuer" sans le moindre message d'erreur. Le vrai `state = loaded`
     // fait par l'appelant juste après un retour réussi reste inchangé.
     state = parsed;
+    // Sauvegarde antérieure à l'ajout du profil CEO : repli sur le diminutif
+    // du club plutôt qu'un champ vide qui planterait le premier affichage.
+    if(!parsed.ceo) parsed.ceo = { name: (parsed.org && parsed.org.tag) || '', avatar: CEO_AVATARS[0] };
     migrateLegacyStartDate(parsed);
     migrateBadMailDates(parsed);
     migrateRenamedMap(parsed, 'Perimeter', 'Blackwater');
@@ -2757,7 +2950,7 @@ function maybeGenerateSocialAward(){
     const best = withStats.slice().sort((a,b)=>(b.seasonStats.rating||0)-(a.seasonStats.rating||0))[0];
     pushSocialPost({
       type:'award', gameId, linkify:false,
-      text:`🏅 Joueur du mois ${GAMES[gameId].name} (communauté) : ${socialPlayerMention(best)} (${socialTeamMention(state.org.name)}), rating moyen ${best.seasonStats.rating.toFixed(2)} sur ${best.seasonStats.matches} matchs.`,
+      text:`🏅 Joueur du mois ${GAMES[gameId].name} (communauté) : ${socialPlayerMention(best)} (${socialTeamMention(state.org.name)}), rating moyen ${(best.seasonStats.rating||0).toFixed(2)} sur ${best.seasonStats.matches} matchs.`,
     });
   });
 }
@@ -5826,9 +6019,12 @@ function renderVCTSlotLeagues(marketMode=false, freeMode=false){
             return `
             <button class="vct-slot-team-btn" data-division="${key}" data-team="${t.replace(/"/g,'&quot;')}">
               <span class="vct-slot-team-info">
-                <span class="vct-slot-team-name">${t}</span>
-                ${reason ? `<span class="vct-slot-team-reason" style="display:block;font-size:11px;color:var(--text-secondary);font-weight:400;margin-top:2px;">${slotSaleReasonText(reason, t)}</span>` : ''}
-                <span class="vct-slot-price">${priceLabel}</span>
+                <span class="vct-slot-team-badge">${escapeHtml(t.trim().charAt(0).toUpperCase())}</span>
+                <span class="vct-slot-team-text">
+                  <span class="vct-slot-team-name">${t}</span>
+                  ${reason ? `<span class="vct-slot-team-reason" style="display:block;font-size:11px;color:var(--text-secondary);font-weight:400;margin-top:2px;">${slotSaleReasonText(reason, t)}</span>` : ''}
+                  <span class="vct-slot-price">${priceLabel}</span>
+                </span>
               </span>
               <span class="vct-slot-team-cta">${freeMode ? 'Choisir' : 'Racheter'} <i class="fa-solid fa-arrow-right"></i></span>
             </button>
@@ -10767,6 +10963,20 @@ function initMainMenu(){
 // précédent/suivant (voir renderPatchNotesModalVersion).
 const PATCH_NOTES_HISTORY = [
   { version:'V0.3.3', notes: [
+    { key:'menu.patchnotes.item58', fr:"Corrigé un plantage au passage au jour suivant : l'annonce mensuelle du \"joueur du mois\" sur les réseaux sociaux pouvait planter pour un joueur sans rating moyen calculé" },
+    { key:'menu.patchnotes.item57', fr:"Priorisation des cartes à l'entraînement (Stratégie Valostrike) : nouveau bouton \"Classer automatiquement\" au-dessus du tableau, qui trie instantanément toutes vos cartes du meilleur niveau d'équipe au plus faible — sans avoir à tout glisser-déposer une par une à chaque fois" },
+    { key:'menu.patchnotes.item56', fr:"Écran de création simplifié : les cartes de personnalisation du passé du directeur et d'aperçu du Conseiller Exécutif ont été retirées de l'écran — le profil \"Ex-joueur professionnel\" s'applique par défaut, et le Conseiller Exécutif reste généré aléatoirement comme avant, simplement sans aperçu ni régénération possible avant de lancer la partie" },
+    { key:'menu.patchnotes.item55', fr:"Zenith et Outpost ont maintenant une vraie identité de décor : un relief propre au biome se dessine tout autour de la zone de jeu (collines pour Zenith, dunes pour Outpost — jamais sous vos pieds, la zone jouable reste plate), avec un vrai point de repère visible de loin (arche de grès à Outpost, arbre ancestral à Zenith) et un décor bien moins générique tout autour" },
+    { key:'menu.patchnotes.item54', fr:"Corrigé un vrai bug d'affichage sur l'écran de création : sur certaines hauteurs de fenêtre, la carte \"Nom de la structure\" pouvait se comprimer et faire apparaître Pays/Couleur/Blason par-dessus les champs suivants au lieu de les afficher normalement. La carte \"Première section eSport\", elle, ne s'étire plus inutilement pour ne plus laisser un grand vide sous les jeux proposés" },
+    { key:'menu.patchnotes.item53', fr:"Nouveau personnage à la création du club : votre Conseiller Exécutif, désormais prévisualisé (avec un bouton pour en générer un autre) directement sur l'écran de création, pas seulement une fois la partie lancée. Généré une fois pour toute la partie (identité, spécialités notées en étoiles, personnalité), consultable ensuite depuis une carte dédiée sur la page Général — pour l'instant une fiche à consulter, sans encore d'analyses ou d'avis automatiques pendant la partie" },
+    { key:'menu.patchnotes.item52', fr:"Le passé de votre directeur ne se limite plus à un bonus unique le jour de la création : chaque profil a maintenant un vrai effet qui continue de jouer tout au long de la partie (regain de réputation, optimisation budgétaire ou croissance des supporters selon le profil, visible en jeu sur la carte Organisation et dès l'écran de création)" },
+    { key:'menu.patchnotes.item51', fr:"Le terme \"manager\" pour vous désigner (vous, à la tête de l'organisation) devient \"directeur\" un peu partout (création du club, page Général) — le poste de Manager que vous recrutez, lui, sur le marché du staff, ne change pas de nom, c'est un métier différent" },
+    { key:'menu.patchnotes.item50', fr:"Votre directeur a maintenant un vrai insigne personnel (médaillon doré avec vos initiales) affiché à côté de son nom dans la carte Organisation de la page Général, à la place de l'ancienne icône générique — et il apparaît déjà en aperçu, mis à jour en direct, dès l'écran de création pendant que vous tapez votre nom" },
+    { key:'menu.patchnotes.item49', fr:"Le passé de votre directeur (choisi à la création) s'affiche maintenant en jeu, dans la carte Organisation de la page Général — avant, ce choix disparaissait après le premier écran" },
+    { key:'menu.patchnotes.item48', fr:"Cartes de niveau de départ (création du club) : le nombre de supporters de départ s'affiche enfin sur la carte, avec la réputation et le budget déjà présents. Sans ça, \"Streamer qui se lance\" avait l'air strictement moins bon que \"Structure sponsorisée\" (moins de réputation ET moins de budget) alors que son vrai atout — une communauté énorme dès le départ — restait invisible" },
+    { key:'menu.patchnotes.item47', fr:"Nouveau à la création du club : le passé de votre directeur (Ex-joueur professionnel, Analyste data & finance, Spécialiste en communication, Directeur polyvalent) donne un vrai bonus de départ — réputation, budget ou supporters selon le profil choisi, en plus du scénario de départ" },
+    { key:'menu.patchnotes.item46', fr:"Écran de choix du slot Challenger de départ (Valostrike) : chaque équipe a maintenant un médaillon avec son initiale plutôt qu'un simple bloc de texte, coins plus généreux et relief — moins plat que les rectangles bruts d'avant" },
+    { key:'menu.patchnotes.item45', fr:"Retiré le choix d'icône du profil directeur (à la création du club) : la grille de petites icônes génériques n'apportait rien de bien lisible, seul le nom reste personnalisable" },
     { key:'menu.patchnotes.item44', fr:"Nouveau : pays de la structure à choisir à la création du club, et notoriété des sponsors (Locale/Nationale/Internationale, visible en badge sur chaque offre) — les sponsors les plus prestigieux paient bien plus mais n'approchent qu'un club déjà réputé. Des sponsors de paris sportifs peuvent désormais approcher le club : très généreux partout, mais risqués (perte de supporters, de réputation, polémique sur les réseaux) dans les pays où ce type de publicité est mal vue ou interdite" },
     { key:'menu.patchnotes.item43', fr:"Bassin de sponsors potentiels triplé (48 → 192 marques fictives) pour éviter les répétitions d'offres sur les longues carrières" },
     { key:'menu.patchnotes.item42', fr:"Concepteur de produit Merch entièrement réorganisé pour tenir sur un seul écran, sans défilement : aperçu et catégorie à gauche, tous les réglages (nom, couleur, matière, technique, prix, quantité) à droite. Catalogue recentré sur le gear esport — Clavier, Souris et Chaise gaming rejoignent Maillot, Casquette, Mug, Sac, Porte-clés et Gourde avec de vrais visuels produit recolorables, tandis que Veste, Kit Pro, Mascotte peluche, Chaussettes, Lunettes et Poster ont été retirés du catalogue" },
@@ -11656,8 +11866,196 @@ const STARTING_DIFFICULTY_LEVELS = [
     infra:'Conditions choisies par vos soins' },
 ];
 
+// Avatars du manager (le joueur lui-même, pas l'organisation) — une simple
+// icône FontAwesome parmi un petit choix, jamais un vrai portrait (aucune
+// image perso possible sans upload, voir le blason qui a le même repli) :
+// juste de quoi donner une identité minimale à "vous" derrière le club.
+const CEO_AVATARS = ['fa-user-tie','fa-user-ninja','fa-user-astronaut','fa-user-graduate','fa-user-secret','fa-user-shield','fa-user-gear','fa-glasses','fa-crown','fa-headset','fa-chess-king','fa-mask'];
+// Passé du manager (vous, pas le club) — remplace l'ancien choix d'icône
+// (grille de glyphes jugée sans intérêt, voir feedback_generic_icon_pickers_disliked)
+// par un VRAI choix mécanique : chaque passé donne un bonus réel appliqué
+// une fois à la création, en plus du scénario de départ (STARTING_DIFFICULTY_LEVELS).
+// bonus.rep est un montant FIXE (petite plage, cohérente quel que soit le
+// scénario) ; bonus.budgetPct/supportersPct sont des POURCENTAGES (ces deux
+// valeurs varient d'un ordre de grandeur selon le scénario choisi — un bonus
+// fixe serait dérisoire sur "Startup ambitieuse" et énorme sur "Repreneur").
+// currentScoutQuality() (voir plus bas dans ce fichier) dérive directement
+// de state.reputation : le bonus de réputation de l'Ex-joueur pro/Ancien
+// scout se répercute donc aussi sur la qualité de scouting de départ, sans
+// avoir besoin d'un second système de bonus dédié.
+// passiveText décrit l'effet mensuel CONTINU de chaque profil (voir
+// tickCeoArchetypePassive plus bas) — en plus du bonus ponctuel ci-dessus,
+// pour que ce choix ne s'épuise pas après le premier jour de la partie.
+const CEO_ARCHETYPES = [
+  { key:'expro', label:'Ex-joueur professionnel', icon:'fa-trophy',
+    desc:"D'ancien joueur compétitif à dirigeant : votre nom est déjà connu du public et de la presse spécialisée.",
+    bonus:{ rep:6 }, factsText:'Réputation de départ +6',
+    passiveText:"Petit regain de réputation chaque mois, tant que vous n'êtes pas déjà une référence" },
+  { key:'analyste', label:'Analyste data & finance', icon:'fa-chart-line',
+    desc:"Formé aux chiffres et aux tableurs plus qu'au terrain : vous savez faire fructifier chaque euro dès le premier jour.",
+    bonus:{ budgetPct:10 }, factsText:'Budget de départ +10%',
+    passiveText:'Optimisation budgétaire discrète chaque mois' },
+  // PAS "Streamer reconverti" (première version) : ça faisait doublon
+  // avec le scénario de départ "Streamer qui se lance" (déjà un profil à
+  // supporters de départ), et devenait carrément contradictoire combiné à
+  // "Startup ambitieuse" (0-500 supporters) — "il y a 2 fois les
+  // streamers ?" signalé. Un métier orienté COMPÉTENCE (faire grandir une
+  // audience par le travail) plutôt qu'un vécu personnel de streamer
+  // fonctionne avec n'importe quel scénario de départ, sans contradiction.
+  { key:'communicant', label:'Spécialiste en communication', icon:'fa-bullhorn',
+    desc:"Campagnes, réseaux sociaux, relations presse : vous savez faire parler de votre organisation, quel que soit le point de départ.",
+    bonus:{ supportersPct:20 }, factsText:'Supporters de départ +20%',
+    passiveText:'Croissance organique des supporters chaque mois' },
+  { key:'polyvalent', label:'Directeur polyvalent', icon:'fa-scale-balanced',
+    desc:"Aucune spécialité marquée, mais une base solide sur tous les plans plutôt qu'un point fort unique.",
+    bonus:{ rep:3, budgetPct:5, supportersPct:10 }, factsText:'Un peu de tout : réputation, budget et supporters',
+    passiveText:'Un peu des trois effets ci-dessus, chaque mois' },
+];
+// Effet mensuel du passé du directeur — appelé depuis le cycle mensuel
+// (voir l'appel juste après tickManagerContractRenewals plus bas), en plus
+// du bonus ponctuel appliqué une seule fois à la création (createOrganization).
+// Montants volontairement modestes (pensés comme un petit avantage constant,
+// pas un moteur de progression à lui seul) : gainReputation() applique déjà
+// son propre amortissement par palier, donc la réputation ne s'envole pas ;
+// budget/supporters sont de petits pourcentages de la valeur ACTUELLE, pas
+// des montants fixes, pour rester proportionnés à n'importe quel stade de
+// la partie sans jamais devenir écrasants ni négligeables.
+function tickCeoArchetypePassive(){
+  if(!state.ceo || !state.ceo.archetype) return;
+  const budgetTrickle = pct=>{
+    const gain = Math.round((state.budget||0) * pct);
+    if(gain>0){ state.budget += gain; recordTransaction('org','other','Optimisation budgétaire (Directeur)', gain); }
+  };
+  const supportersTrickle = pct=>{
+    const gain = Math.round((state.supporters||0) * pct);
+    if(gain>0) state.supporters += gain;
+  };
+  switch(state.ceo.archetype){
+    case 'expro':
+      if((state.reputation||0) < 90) gainReputation(0.5);
+      break;
+    case 'analyste':
+      budgetTrickle(0.003);
+      break;
+    case 'communicant':
+      supportersTrickle(0.004);
+      break;
+    case 'polyvalent':
+      if((state.reputation||0) < 90) gainReputation(0.15);
+      budgetTrickle(0.0012);
+      supportersTrickle(0.0015);
+      break;
+  }
+}
+/* ============================================================
+   CONSEILLER EXÉCUTIF — second personnage clé, généré une seule fois à la
+   création du club (voir createOrganization → state.advisor) et distinct
+   du profil du directeur (VOUS, voir CEO_ARCHETYPES juste au-dessus) : lui
+   a un point de vue et des compétences propres, affichés en jeu plutôt que
+   simplement mentionnés. Réutilise les mêmes viviers que la génération de
+   staff (FIRST_NAMES/LAST_NAMES/NATIONALITIES/genStaffGender) et des noms
+   d'organisations déjà présents ailleurs dans le jeu (CS2_TIER1_TEAMS/
+   RL_TIER1_TEAMS) plutôt que d'inventer un système de noms séparé.
+   ============================================================ */
+const ADVISOR_SPECIALTIES = ['Recrutement','Négociation','Analyse financière','Détection de talents','Développement de staff','Stratégie e-sport','Marketing','Gestion de crise'];
+// Une phrase par spécialité, utilisée pour la force (spécialité à 5) et la
+// faiblesse (spécialité à 2) du profil généré — le texte de personnalité
+// reste donc toujours cohérent avec les notes affichées, jamais tiré à part.
+const ADVISOR_STRENGTH_BY_SPECIALTY = {
+  'Recrutement':"Un carnet d'adresses immense dans le milieu du recrutement — peu de profils lui échappent.",
+  'Négociation':"Sait faire baisser un prix ou monter une offre sans jamais rompre la relation.",
+  'Analyse financière':"Repère un déséquilibre budgétaire avant qu'il ne devienne un vrai problème.",
+  'Détection de talents':"Un œil rare pour repérer un joueur prometteur avant que le marché ne s'en aperçoive.",
+  'Développement de staff':"Sait faire progresser un membre du staff plutôt que de le remplacer au premier signe de faiblesse.",
+  'Stratégie e-sport':"Anticipe les tendances de la scène compétitive avant qu'elles ne deviennent évidentes.",
+  'Marketing':"Sait construire une image de marque qui dépasse les simples résultats sportifs.",
+  'Gestion de crise':"Garde son sang-froid quand tout le monde autour panique.",
+};
+const ADVISOR_WEAKNESS_BY_SPECIALTY = {
+  'Recrutement':"Moins à l'aise pour évaluer un profil hors de son réseau habituel.",
+  'Négociation':"Peut se montrer trop rigide face à un interlocuteur qui refuse de bouger.",
+  'Analyse financière':"Peut perdre du temps à revérifier des chiffres déjà solides, au détriment de la rapidité.",
+  'Détection de talents':"A tendance à sous-estimer un profil trop atypique par rapport aux standards habituels.",
+  'Développement de staff':"Délègue difficilement, au risque de devenir un goulot d'étranglement.",
+  'Stratégie e-sport':"Peut s'attacher trop longtemps à un plan qui ne fonctionne déjà plus.",
+  'Marketing':"Moins inspiré dès qu'il s'agit de communication grand public plutôt que spécialisée.",
+  'Gestion de crise':"A tendance à agir avant d'avoir pris le temps de consulter.",
+};
+const ADVISOR_WORK_STYLES = [
+  "Direct et sans détour : préfère annoncer une mauvaise nouvelle tout de suite plutôt que de l'enrober.",
+  "Méthodique et posé : ne recommande jamais rien sans avoir vérifié les chiffres deux fois.",
+  "Instinctif mais informé : fait confiance à son ressenti de terrain autant qu'aux statistiques.",
+  "Diplomate : cherche toujours la formulation qui fait passer un désaccord sans braquer personne.",
+  "Exigeant : vise haut et le montre, quitte à mettre une pression que tout le monde n'apprécie pas.",
+];
+const ADVISOR_AMBITIONS = [
+  "Être un jour reconnu(e) comme celui ou celle qui a construit un champion du monde depuis rien.",
+  "Prouver qu'une organisation peut durer une décennie sans jamais brader son identité pour un sponsor.",
+  "Devenir une référence citée par les autres organisations quand elles cherchent un modèle à suivre.",
+  "Voir l'académie qu'il/elle a contribué à bâtir devenir la meilleure filière de formation de la scène.",
+  "Ne plus jamais revivre l'échec qui a coûté sa précédente organisation — et le prouver par les résultats.",
+];
+const ADVISOR_VISIONS = [
+  "Le marché va se consolider : moins d'organisations, mais bien plus professionnelles.",
+  "L'avenir appartient à ceux qui diversifient leurs revenus au lieu de dépendre des seuls cashprizes.",
+  "Le contenu et la communauté compteront bientôt autant que les résultats sportifs eux-mêmes.",
+  "La discipline financière fera la différence entre les organisations qui durent et celles qui flambent puis disparaissent.",
+  "Le bien-être du staff et des joueurs est un investissement, pas une dépense annexe.",
+];
+const ADVISOR_REPUTATION_TEXTS = [
+  "Reconnu(e) dans le milieu, sans être une figure médiatique.",
+  "Une référence respectée par ses pairs, peu connue du grand public.",
+  "Encore en train de se faire un nom, mais du talent que les initiés remarquent déjà.",
+];
+function genExecutiveAdvisor(){
+  const specialties = {};
+  ADVISOR_SPECIALTIES.forEach(s=>{ specialties[s] = randInt(3,4); });
+  const shuffled = [...ADVISOR_SPECIALTIES].sort(()=>Math.random()-0.5);
+  const topSpecialty = shuffled[0];
+  const weakSpecialty = shuffled[1];
+  specialties[topSpecialty] = 5;
+  specialties[weakSpecialty] = 2;
+  const orgPool = [...CS2_TIER1_TEAMS, ...RL_TIER1_TEAMS];
+  const pastOrgs = [];
+  while(pastOrgs.length < 2){
+    const pick = choice(orgPool);
+    if(!pastOrgs.includes(pick)) pastOrgs.push(pick);
+  }
+  return {
+    name: `${choice(FIRST_NAMES)} ${choice(LAST_NAMES)}`,
+    gender: genStaffGender(),
+    age: randInt(29,54),
+    nationality: choice(NATIONALITIES),
+    pastOrgs,
+    reputationText: choice(ADVISOR_REPUTATION_TEXTS),
+    specialties, topSpecialty, weakSpecialty,
+    workStyle: choice(ADVISOR_WORK_STYLES),
+    strength: ADVISOR_STRENGTH_BY_SPECIALTY[topSpecialty],
+    weakness: ADVISOR_WEAKNESS_BY_SPECIALTY[weakSpecialty],
+    ambition: choice(ADVISOR_AMBITIONS),
+    vision: choice(ADVISOR_VISIONS),
+  };
+}
 let ngChoice = { color:COLOR_SWATCHES[0], game:null, vctDivision:null, vctTeam:null, vctCost:0, lolLeague:null, gcRegion:null, country:'fr', difficulty:'streamer', logo:null,
+  ceoName:'', ceoAvatar:CEO_AVATARS[0], ceoArchetype:CEO_ARCHETYPES[0].key,
   customLevel: { budget:300000, rep:20, supporters:5000, sponsor:false } };
+// Identité visuelle du manager : premier essai volontairement MINIMAL —
+// un monogramme dérivé du nom (initiales), aucune configuration à faire.
+// Pas un nouveau picker à rejeter une 3e fois (voir
+// feedback_generic_icon_pickers_disliked) : rien à choisir, donc rien à
+// mal choisir. Si ça plaît, une vraie Forge dédiée (façon blason du club)
+// pourra suivre — pas avant validation de cette version simple.
+function ceoInitials(name){
+  const parts = (name||'').trim().split(/\s+/).filter(Boolean);
+  if(!parts.length) return '?';
+  if(parts.length===1) return parts[0].charAt(0).toUpperCase();
+  return (parts[0].charAt(0) + parts[parts.length-1].charAt(0)).toUpperCase();
+}
+function renderCeoMonogramHtml(name, sizePx=40){
+  const initials = ceoInitials(name);
+  const fontSize = Math.round(sizePx*0.42);
+  return `<div class="ceo-monogram" style="width:${sizePx}px;height:${sizePx}px;font-size:${fontSize}px;">${escapeHtml(initials)}</div>`;
+}
 // Blason par défaut pendant la création : state.org n'existe pas encore
 // (créé seulement dans createOrganization()) — affiché AVANT toute
 // personnalisation, donc fixe plutôt que tiré au hasard du nom (un
@@ -11688,7 +12086,15 @@ function renderDifficultyGrid(){
     // Étoiles retirées (demande explicite) : ces scénarios ont chacun leur
     // propre identité/compromis plutôt qu'un ordre strict facile->difficile,
     // un repère étoilé n'avait plus vraiment de sens.
-    const factsText = lvl.custom ? 'Réglages personnalisés' : `Réputation ${lvl.repRange[0]} à ${lvl.repRange[1]} · <b>${formatMoney(lvl.budget)}</b>`;
+    // Les supporters manquaient sur la carte (seulement réputation +
+    // budget) : deux scénarios peuvent alors sembler illogiques l'un à
+    // côté de l'autre — "Streamer qui se lance" (rép. 5-15, 300k€)
+    // paraissait strictement dominé par "Structure sponsorisée" (rép.
+    // 10-20, 400k€, + un sponsor gratuit) sur les deux seuls chiffres
+    // visibles, alors que son vrai atout (20 000 à 40 000 supporters,
+    // contre 1 500-4 000 pour l'autre) n'apparaissait nulle part.
+    const compactK = n => n>=1000 ? Math.round(n/1000)+'k' : String(n);
+    const factsText = lvl.custom ? 'Réglages personnalisés' : `Réputation ${lvl.repRange[0]} à ${lvl.repRange[1]} · <b>${formatMoney(lvl.budget)}</b> · ${compactK(lvl.supportersRange[0])}-${compactK(lvl.supportersRange[1])} supporters`;
     // Description/infra complètes reportées en info-bulle (title) — l'écran
     // de création tient désormais dans la hauteur de la fenêtre sans
     // défilement (voir #screen-newgame, style.css), plus de place pour un
@@ -12533,19 +12939,30 @@ function countryFlagUrl(c){ return `https://flagcdn.com/24x18/${c.flagIso}.png`;
 // création est (re)visité — un addEventListener à chaque visite
 // empilerait un nouvel écouteur identique à chaque fois).
 let orgCountryPickerBound = false;
+// Ignore les accents pour la recherche ("cote d ivoire" doit retrouver
+// "Côte d'Ivoire") — décompose les caractères accentués puis retire les
+// diacritiques (astuce standard, voir MDN String.prototype.normalize).
+function stripDiacritics(s){ return s.normalize('NFD').replace(/[̀-ͯ]/g,''); }
 function initOrgCountryPicker(){
   const trigger = document.getElementById('orgCountryTrigger');
   const triggerFlag = document.getElementById('orgCountryTriggerFlag');
   const triggerLabel = document.getElementById('orgCountryTriggerLabel');
   const list = document.getElementById('orgCountryList');
-  const renderList = ()=>{
-    list.innerHTML = SPONSOR_COUNTRIES.map(c=>`
+  const search = document.getElementById('orgCountrySearch');
+  const rows = document.getElementById('orgCountryRows');
+  // ~200 pays (demandé explicitement — liste quasi complète, voir
+  // SPONSOR_COUNTRIES) : une liste brute sans recherche serait pénible à
+  // parcourir, d'où ce champ de filtre en tête de panneau.
+  const renderRows = (filter='')=>{
+    const needle = stripDiacritics(filter.trim().toLowerCase());
+    const filtered = needle ? SPONSOR_COUNTRIES.filter(c=> stripDiacritics(c.label.toLowerCase()).includes(needle)) : SPONSOR_COUNTRIES;
+    rows.innerHTML = filtered.length ? filtered.map(c=>`
       <div class="country-picker-row ${c.key===ngChoice.country?'selected':''}" data-country="${c.key}">
         <img class="country-flag-icon" src="${countryFlagUrl(c)}" alt="" onerror="this.style.visibility='hidden'">
         <span>${escapeHtml(c.label)}</span>
       </div>
-    `).join('');
-    list.querySelectorAll('[data-country]').forEach(row=>{
+    `).join('') : `<div class="country-picker-empty">Aucun pays trouvé.</div>`;
+    rows.querySelectorAll('[data-country]').forEach(row=>{
       row.onclick = ()=>{
         ngChoice.country = row.dataset.country;
         updateTrigger();
@@ -12560,26 +12977,155 @@ function initOrgCountryPicker(){
     triggerFlag.onerror = ()=>{ triggerFlag.style.visibility = 'hidden'; };
     triggerLabel.textContent = c.label;
   };
+  // Repositionne le panneau (position:fixed, coordonnées en px — voir
+  // .country-picker-list, style.css, pour le pourquoi du fixed plutôt
+  // qu'absolute) au-dessus OU en dessous du champ selon la place vraiment
+  // disponible, jamais une position figée qui pourrait déborder sur
+  // "Créer mon organisation" (juste en dessous, hors de cette carte) —
+  // même logique qu'un vrai combobox.
+  const positionList = ()=>{
+    const createBtn = document.getElementById('btnCreateOrg');
+    const rect = trigger.getBoundingClientRect();
+    const limitBelow = createBtn ? createBtn.getBoundingClientRect().top - 10 : window.innerHeight - 16;
+    const spaceBelow = limitBelow - rect.bottom;
+    const spaceAbove = rect.top - 16;
+    const reserved = search.offsetHeight + 12; // champ de recherche + paddings du panneau
+    const openAbove = spaceBelow < 160 && spaceAbove > spaceBelow;
+    list.style.left = Math.round(rect.left) + 'px';
+    list.style.width = Math.round(rect.width) + 'px';
+    if(openAbove){
+      list.style.bottom = Math.round(window.innerHeight - rect.top + 4) + 'px';
+      list.style.top = 'auto';
+      rows.style.maxHeight = Math.max(120, Math.min(240, spaceAbove - reserved)) + 'px';
+    } else {
+      list.style.top = Math.round(rect.bottom + 4) + 'px';
+      list.style.bottom = 'auto';
+      rows.style.maxHeight = Math.max(120, Math.min(240, spaceBelow - reserved)) + 'px';
+    }
+  };
   trigger.onclick = (e)=>{
     e.stopPropagation();
     list.hidden = !list.hidden;
-    if(!list.hidden) renderList();
+    if(!list.hidden){
+      search.value = '';
+      renderRows();
+      positionList();
+      search.focus();
+    }
   };
+  search.oninput = ()=> renderRows(search.value);
+  // Empêche le clic dans le champ de recherche de fermer le panneau (voir
+  // l'écouteur de clic extérieur plus bas, qui ne fait que vérifier
+  // closest('#orgCountryPicker')/'#orgCountryList' — inutile ici, mais la
+  // touche Entrée ne doit pas non plus soumettre un formulaire englobant.
+  // Échap referme toujours le panneau (voir aussi le clic sur la flèche —
+  // signalé comme peu fiable, ce raccourci donne un second moyen sûr de le
+  // refermer quel qu'en soit la cause).
+  search.onkeydown = (e)=>{
+    if(e.key==='Enter') e.preventDefault();
+    else if(e.key==='Escape'){ list.hidden = true; trigger.focus(); }
+  };
+  // Repositionne au lieu de se fermer si la fenêtre change de taille
+  // pendant que le panneau est ouvert (redimensionnement, rotation) —
+  // sinon les coordonnées en dur restent celles calculées à l'ouverture.
+  window.addEventListener('resize', ()=>{ if(!list.hidden) positionList(); });
   updateTrigger();
   if(!orgCountryPickerBound){
     orgCountryPickerBound = true;
+    // Déplacé en enfant direct de <body>, HORS de .newgame-wrap (voir
+    // .country-picker-list, style.css) : .newgame-wrap peut porter un
+    // filter CSS (réglages luminosité/contraste, ou le filtre SVG des modes
+    // daltonisme — voir body.colorblind-* dans style.css) — un filtre SVG en
+    // particulier ne rend que dans une région bornée à ~120% de la boîte de
+    // l'élément filtré par défaut, donc tout descendant absolute/fixed qui
+    // déborderait largement au-delà (ex. cette liste de 197 pays) s'y ferait
+    // couper, même sans overflow:hidden explicite (constaté en jeu, pas
+    // reproduit avec un simple filter CSS basique en test isolé — piège
+    // spécifique aux filtres SVG). Déplacer le panneau lui-même hors de
+    // toute chaîne d'ancêtres filtrée est la façon fiable d'échapper à ça.
+    document.body.appendChild(list);
     document.addEventListener('click', (e)=>{
       const l = document.getElementById('orgCountryList');
-      if(l && !l.hidden && !e.target.closest('#orgCountryPicker')) l.hidden = true;
+      if(l && !l.hidden && !e.target.closest('#orgCountryPicker') && !e.target.closest('#orgCountryList')) l.hidden = true;
     });
   }
 }
+// Profil du manager (VOUS, pas l'organisation) — nom optionnel (repli sur
+// le diminutif du club si vide, voir createOrganization) + passé du
+// manager (CEO_ARCHETYPES, un vrai bonus mécanique, voir plus haut). Le
+// choix d'icône parmi CEO_AVATARS a été retiré (grille de glyphes
+// FontAwesome génériques jugée ratée telle quelle, y compris redessinée en
+// médaillons ronds — "retire ça c'est nul") : ngChoice.ceoAvatar garde sa
+// valeur par défaut (CEO_AVATARS[0]), l'icône sert toujours à l'affichage
+// (voir state.ceo.avatar) mais n'est plus un choix.
+function initCeoProfilePicker(){
+  const nameInput = document.getElementById('ceoNameInput');
+  const updatePreview = ()=>{
+    const preview = document.getElementById('ceoNamePreview');
+    if(preview) preview.innerHTML = renderCeoMonogramHtml(ngChoice.ceoName, 40);
+  };
+  if(nameInput){
+    nameInput.value = ngChoice.ceoName;
+    nameInput.oninput = ()=>{ ngChoice.ceoName = nameInput.value; updatePreview(); };
+  }
+  updatePreview();
+  renderCeoArchetypeGrid();
+  renderAdvisorPreview();
+}
+// Aperçu du Conseiller Exécutif dès l'écran de création (voir
+// genExecutiveAdvisor) : sans ça, le personnage n'apparaissait qu'après la
+// création, sur la page Général — invisible pour quelqu'un qui n'a pas
+// encore lancé la partie ("ce que tu as fais je le vois pas"). Le profil
+// tiré ici (ngChoice.advisorPreview) est repris TEL QUEL par
+// createOrganization, jamais régénéré en silence, pour que ce qu'on
+// prévisualise soit vraiment ce qu'on obtient.
+function renderAdvisorPreview(){
+  if(!ngChoice.advisorPreview) ngChoice.advisorPreview = genExecutiveAdvisor();
+  const a = ngChoice.advisorPreview;
+  const mono = document.getElementById('advisorPreviewMonogram');
+  const nameEl = document.getElementById('advisorPreviewName');
+  const specEl = document.getElementById('advisorPreviewSpecialty');
+  if(mono) mono.innerHTML = renderCeoMonogramHtml(a.name, 40);
+  if(nameEl) nameEl.textContent = a.name;
+  if(specEl) specEl.textContent = `${a.topSpecialty} · ${a.age} ans`;
+  const rerollBtn = document.getElementById('btnRerollAdvisor');
+  if(rerollBtn) rerollBtn.onclick = ()=>{ ngChoice.advisorPreview = genExecutiveAdvisor(); renderAdvisorPreview(); };
+}
+// Même gabarit visuel que renderDifficultyGrid (.difficulty-option) —
+// composant déjà éprouvé sur ce même écran, pas une nouvelle esthétique à
+// faire valider.
+function renderCeoArchetypeGrid(){
+  const grid = document.getElementById('ceoArchetypeGrid');
+  if(!grid) return;
+  grid.innerHTML = '';
+  CEO_ARCHETYPES.forEach(arch=>{
+    const el = document.createElement('div');
+    el.className = 'difficulty-option' + (arch.key===ngChoice.ceoArchetype ? ' selected' : '');
+    el.title = arch.desc;
+    el.innerHTML = `
+      <div class="difficulty-option-head">
+        <div class="difficulty-option-icon"><i class="fa-solid ${arch.icon}"></i></div>
+        <div class="difficulty-option-title">${arch.label}</div>
+      </div>
+      <div class="difficulty-option-facts">${arch.factsText}</div>
+      <div class="difficulty-option-passive"><i class="fa-solid fa-repeat"></i> ${arch.passiveText}</div>
+    `;
+    el.addEventListener('click', ()=>{
+      grid.querySelectorAll('.difficulty-option').forEach(o=>o.classList.remove('selected'));
+      el.classList.add('selected');
+      ngChoice.ceoArchetype = arch.key;
+    });
+    grid.appendChild(el);
+  });
+}
 function initNewGameScreen(){
   ngChoice = { color:COLOR_SWATCHES[0], game:null, vctDivision:null, vctTeam:null, vctCost:0, lolLeague:null, gcRegion:null, country:'fr', difficulty:'streamer', logo:null,
+    ceoName:'', ceoAvatar:CEO_AVATARS[0], ceoArchetype:CEO_ARCHETYPES[0].key, advisorPreview:null,
     customLevel: { budget:300000, rep:20, supporters:5000, sponsor:false } };
 
   document.getElementById('btnBackFromNewGame').onclick = ()=> showScreen('screen-mainmenu');
   applyGameThemeToNewGameScreen(null);
+  initCeoProfilePicker();
 
   // Pays de la structure — sert uniquement au risque des sponsors de paris
   // sportifs selon la réglementation locale (voir SPONSOR_COUNTRIES /
@@ -12983,6 +13529,16 @@ function createOrganization(){
   state = defaultState();
   installBudgetGuard();
   state.org = { name, tag, color:ngChoice.color, logo: ngChoice.logo || null, country: ngChoice.country || 'fr' };
+  // Profil du manager (vous, pas le club) — nom optionnel, replié sur le
+  // diminutif si laissé vide plutôt que d'imposer un champ obligatoire de
+  // plus sur un écran de création déjà chargé.
+  const ceoArchetype = CEO_ARCHETYPES.find(a=>a.key===ngChoice.ceoArchetype) || CEO_ARCHETYPES[0];
+  state.ceo = { name: (ngChoice.ceoName||'').trim() || tag, avatar: ngChoice.ceoAvatar || CEO_AVATARS[0], archetype: ceoArchetype.key };
+  // Conseiller Exécutif : reprend le profil déjà prévisualisé sur l'écran
+  // de création (voir renderAdvisorPreview) plutôt que d'en tirer un
+  // nouveau en silence — jamais régénéré ensuite, comme le profil du
+  // directeur, il doit rester le même personnage toute la partie.
+  state.advisor = ngChoice.advisorPreview || genExecutiveAdvisor();
   state.sections = [ngChoice.game];
   state.squads[ngChoice.game] = [];
   state.academies[ngChoice.game] = []; // le centre de formation démarre vide
@@ -13005,6 +13561,15 @@ function createOrganization(){
     state.supporters = randInt(startLevel.supportersRange[0], startLevel.supportersRange[1]);
     state.budget = startLevel.budget;
   }
+  // Bonus du passé du manager (CEO_ARCHETYPES) — appliqué APRÈS le tirage
+  // du scénario de départ, jamais avant : un bonus fixe de réputation
+  // s'additionne simplement, les bonus en % (budget/supporters) doivent
+  // porter sur la valeur déjà tirée pour ce scénario précis, pas sur une
+  // base arbitraire.
+  const ceoBonus = ceoArchetype.bonus || {};
+  if(ceoBonus.rep) state.reputation += ceoBonus.rep;
+  if(ceoBonus.budgetPct) state.budget = Math.round(state.budget * (1 + ceoBonus.budgetPct/100));
+  if(ceoBonus.supportersPct) state.supporters = Math.round(state.supporters * (1 + ceoBonus.supportersPct/100));
   state.sponsor = null; // aucun partenariat déjà signé : voir generateInitialSponsorOffers (4 propositions à choisir)
   state.startingLevel = startLevel.key; // conservé pour référence (fiche du club, actualités)
 
@@ -13693,7 +14258,15 @@ document.addEventListener('click', (e)=>{
 // jouiez vous-même ce jour-là. Permet au Classement Général de rester à
 // jour même dans les sections que vous ne consultez pas activement.
 function simulateRivalMatchesForSection(gameId){
-  const teams = (state.standings[gameId]||[]).filter(t=>!t.self);
+  // Filet de sécurité : une structure sous l'effectif minimum (voir
+  // MIN_ROSTER_SIZE, ex. 4/5 à Valostrike) ne peut pas être tirée au sort
+  // pour "jouer" un match ici — normalement déjà évité en amont par
+  // aiRefillRosterIfNeeded (recrutement d'urgence même fenêtre fermée),
+  // mais le temps que ce recrutement se résolve (2-5 jours), mieux vaut
+  // qu'elle ne dispute simplement aucun match plutôt que d'en gagner/perdre
+  // un à effectif incomplet (bug signalé : "structures qui jouent à 4").
+  const minSize = MIN_ROSTER_SIZE[gameId] || (GAMES[gameId].roles||[]).length;
+  const teams = (state.standings[gameId]||[]).filter(t=> !t.self && (t.roster||[]).length >= minSize);
   if(teams.length<2) return;
   const matchCount = randInt(0,1);
   for(let i=0;i<matchCount;i++){
@@ -13922,6 +14495,7 @@ function advanceDay(){
     tickManagerContractRenewals();
     sendManagerMonthlyReport();
     checkManagerBudgetOverrun();
+    tickCeoArchetypePassive();
     sendAcademyProgressReports();
     sendMapPoolAnalysisMail();
     sendPlayerEvaluationReports();
@@ -21926,6 +22500,20 @@ function renderGeneralPage(){
         <div class="card-grid two">
           <div class="card info-card">
             <h4><i class="fa-solid fa-shield-halved"></i> ${T('general.org.title','Organisation')}</h4>
+            ${state.ceo ? (()=>{
+              // Passé du manager (voir CEO_ARCHETYPES) : absent sur les
+              // sauvegardes antérieures à ce système, d'où le repli sur
+              // 'polyvalent' plutôt qu'un .find() qui renverrait undefined.
+              const arch = CEO_ARCHETYPES.find(a=>a.key===state.ceo.archetype) || CEO_ARCHETYPES.find(a=>a.key==='polyvalent');
+              return `<div class="ceo-card-header">
+                ${renderCeoMonogramHtml(state.ceo.name, 40)}
+                <div>
+                  <div class="ceo-card-name">${escapeHtml(state.ceo.name||'')}</div>
+                  ${arch ? `<div class="ceo-card-archetype">${arch.label}</div>` : ''}
+                  ${arch ? `<div class="ceo-card-passive" title="Effet actif chaque mois"><i class="fa-solid fa-repeat"></i> ${arch.passiveText}</div>` : ''}
+                </div>
+              </div>`;
+            })() : ''}
             <div class="info-row"><span>${T('general.org.name','Nom')}</span><span>${state.org.name}</span></div>
             <div class="info-row"><span>${T('general.org.tag','Diminutif')}</span><span>${state.org.tag}</span></div>
             <div class="info-row"><span>${T('general.org.activeSections','Sections actives')}</span><span>${state.sections.length}</span></div>
@@ -21942,6 +22530,18 @@ function renderGeneralPage(){
         </div>
       </div>
       <div class="ov-side">
+        ${state.advisor ? `
+          <div class="card info-card advisor-card" id="advisorCardBtn" style="cursor:pointer;margin-bottom:16px;">
+            <h4><i class="fa-solid fa-user-tie"></i> Conseiller Exécutif</h4>
+            <div class="ceo-card-header" style="margin-bottom:0;padding-bottom:0;border-bottom:none;">
+              ${renderCeoMonogramHtml(state.advisor.name, 40)}
+              <div>
+                <div class="ceo-card-name">${escapeHtml(state.advisor.name)}</div>
+                <div class="ceo-card-archetype">${escapeHtml(state.advisor.topSpecialty)}</div>
+              </div>
+            </div>
+          </div>
+        ` : ''}
         <div class="section-title" style="margin-top:0;">${T('general.social.title','Réseaux')}</div>
         ${renderSocialWidget(1)}
       </div>
@@ -21955,6 +22555,8 @@ function bindGeneralPageEvents(){
   });
   const moreLink = document.getElementById('socialWidgetMoreLink');
   if(moreLink) moreLink.onclick = (e)=>{ e.preventDefault(); navigateTo('social'); };
+  const advisorCardBtn = document.getElementById('advisorCardBtn');
+  if(advisorCardBtn) advisorCardBtn.onclick = ()=> openAdvisorProfileModal();
   // Cartes Budget/Sponsor cliquables (demande explicite : plus rapide que de
   // repasser par le menu déroulant Finances). Réputation/Supporters restent
   // volontairement informatives — aucune page dédiée n'existe pour elles,
@@ -24865,6 +25467,58 @@ function openClubProfileModal(){
       navigateTo('section', el.dataset.jumpSection);
     };
   });
+}
+
+// Fiche du Conseiller Exécutif (voir genExecutiveAdvisor/state.advisor) —
+// même coquille de modal que le reste du jeu (#profileModalBody), lecture
+// seule : aucune action, ce personnage n'est ni recrutable ni licenciable.
+function openAdvisorProfileModal(){
+  const a = state.advisor;
+  if(!a) return;
+  document.getElementById('profileModalBody').innerHTML = `
+    <div class="profile-modal-header">
+      <div class="profile-modal-avatar"><i class="fa-solid fa-user-tie"></i></div>
+      <div>
+        <div class="profile-modal-name">${escapeHtml(a.name)}</div>
+        <div class="profile-modal-sub">Conseiller Exécutif · ${flagImg(a.nationality,14)} ${nationalityName(a.nationality)}</div>
+      </div>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-secondary);font-style:italic;margin-bottom:14px;">${a.reputationText}</p>
+
+    <div class="profile-stat-grid">
+      <div class="profile-stat-card"><div class="profile-stat-label">Âge</div><div class="profile-stat-value">${a.age} ans</div></div>
+      <div class="profile-stat-card"><div class="profile-stat-label">Sexe</div><div class="profile-stat-value" style="font-size:15px;">${a.gender}</div></div>
+      <div class="profile-stat-card" style="grid-column:span 2;"><div class="profile-stat-label">Anciennes organisations</div><div class="profile-stat-value" style="font-size:14px;">${a.pastOrgs.join(' · ')}</div></div>
+    </div>
+
+    <div class="profile-section-title"><i class="fa-solid fa-star"></i> Spécialités</div>
+    ${ADVISOR_SPECIALTIES.map(s=>`
+      <div class="attr-row"><span>${s}</span>${starRating(a.specialties[s],5)}</div>
+    `).join('')}
+
+    <div class="profile-section-title"><i class="fa-solid fa-brain"></i> Personnalité</div>
+    <div class="personality-card">
+      <div class="personality-card-title">Style de travail</div>
+      <div class="personality-card-desc">${a.workStyle}</div>
+    </div>
+    <div class="personality-card">
+      <div class="personality-card-title">Force : ${a.topSpecialty}</div>
+      <div class="personality-card-desc">${a.strength}</div>
+    </div>
+    <div class="personality-card">
+      <div class="personality-card-title">Faiblesse : ${a.weakSpecialty}</div>
+      <div class="personality-card-desc">${a.weakness}</div>
+    </div>
+    <div class="personality-card">
+      <div class="personality-card-title">Ambition personnelle</div>
+      <div class="personality-card-desc">${a.ambition}</div>
+    </div>
+    <div class="personality-card">
+      <div class="personality-card-title">Vision de l'esport</div>
+      <div class="personality-card-desc">${a.vision}</div>
+    </div>
+  `;
+  openProfileModalOverlay();
 }
 
 // Clic sur un nom d'équipe : pour votre propre structure, direction la
@@ -27816,7 +28470,10 @@ function renderMapTrainingFocusView(gameId){
   const focus = (state.trainingMapFocus||{})[gameId] || null;
   return `
     <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">Choisissez une carte comme focus d'entraînement : vos scrims se joueront prioritairement dessus, ce qui alimente sa maîtrise réelle plus vite que les autres.</p>
-    <p style="color:var(--text-secondary);font-size:12.5px;margin-bottom:16px;"><i class="fa-solid fa-arrows-up-down"></i> Glissez-déposez une ligne pour classer vos cartes vous-même, les 2 premières deviennent vos cartes favorites, les 2 suivantes vos cartes fortes, les 2 suivantes vos cartes faibles, le reste à bannir (voir section 4 ci-dessous).</p>
+    <p style="color:var(--text-secondary);font-size:12.5px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <span><i class="fa-solid fa-arrows-up-down"></i> Glissez-déposez une ligne pour classer vos cartes vous-même, les 2 premières deviennent vos cartes favorites, les 2 suivantes vos cartes fortes, les 2 suivantes vos cartes faibles, le reste à bannir (voir section 4 ci-dessous).</span>
+      <button class="btn btn-sm" id="autoSortMapPriorityBtn" title="Reclasse les cartes du meilleur niveau d'équipe au plus faible"><i class="fa-solid fa-wand-magic-sparkles"></i> Classer automatiquement</button>
+    </p>
     ${focus ? `<div class="opt-note" style="margin-bottom:16px;"><i class="fa-solid fa-crosshairs"></i><span>Focus actuel : <b>${focus}</b>${(state.trainingMapFocusAuto||{})[gameId] ? ' <span class="badge badge-blue" style="margin-left:4px;"><i class="fa-solid fa-user-tie"></i> Choisi par l\'Assistant Coach</span>' : ''}. <button class="btn btn-sm" id="clearMapFocusBtn" style="margin-left:10px;">Retirer le focus</button></span></div>` : ''}
     <div class="map-priority-list" style="--map-priority-cols:32px minmax(160px,1.4fr) 110px 170px 190px;">
       <div class="map-priority-list-head">
@@ -31430,6 +32087,12 @@ function bindCoachViewEvents(gameId){
     saveState();
     renderSectionPage(gameId, 'strategy');
   };
+  const autoSortBtn = document.getElementById('autoSortMapPriorityBtn');
+  if(autoSortBtn) autoSortBtn.onclick = ()=>{
+    autoSortMapPriority(gameId);
+    toast('Cartes reclassées automatiquement par niveau d\'équipe.', 'success');
+    renderSectionPage(gameId, 'strategy');
+  };
 }
 
 // Onglet "Stratégie" de Rocket Champ : contrairement à Valorant (cartes,
@@ -32246,6 +32909,19 @@ function reorderMapPriority(gameId, draggedMap, targetMap){
   if(from===-1 || to===-1) return;
   order.splice(from,1);
   order.splice(to,0,draggedMap);
+  saveState();
+}
+// Classement automatique (bouton "Classer automatiquement") : évite de
+// devoir glisser-déposer les 7-8 cartes à la main à chaque fois. Trie par
+// niveau d'équipe réel (blended, la même valeur que la colonne "Niveau de
+// l'équipe"/Tier affichée) plutôt que par ROI d'entraînement — cette liste
+// sert à désigner favorites/fortes/faibles/à bannir (section 5), une
+// question de niveau de jeu sur la carte, pas de quelle carte progresserait
+// le plus vite à l'entraînement.
+function autoSortMapPriority(gameId){
+  const sorted = computeMapTrainingPriority(gameId).slice().sort((a,b)=> b.blended-a.blended);
+  state.mapPriorityOrder = state.mapPriorityOrder || {};
+  state.mapPriorityOrder[gameId] = sorted.map(p=>p.map);
   saveState();
 }
 function computeMapTrainingPriority(gameId){
