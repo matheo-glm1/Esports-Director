@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Éditeur de personnages</title>
+<link href="vendor/fonts/fonts.css" rel="stylesheet">
+<style>
+  /* Mêmes jetons visuels que l'éditeur de cartes — charbon + or, jamais de
+     bleu ni de violet dans l'interface (identité du jeu). */
+  :root{
+    --bg:#121214; --panel:#18181B; --panel-2:#1D1D22; --border:rgba(255,255,255,0.08);
+    --accent:#C9A15A; --accent-2:#A9863F; --accent-rgb:201,161,90;
+    --text:#EDEDEF; --text-2:#8C8C93;
+    --danger:#D9707C; --viewport-bg:#0d0d0f;
+    --radius-sm:8px; --radius-md:12px;
+    --shadow-soft:0 4px 18px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.4);
+    --ease:cubic-bezier(.2,.8,.2,1);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
+    color:var(--text);font-family:'Manrope','Segoe UI',system-ui,sans-serif;font-size:13px;}
+  ::-webkit-scrollbar{width:10px;height:10px;}
+  ::-webkit-scrollbar-thumb{background:var(--panel-2);border-radius:8px;border:2px solid var(--panel);}
+
+  #app{display:grid;grid-template-rows:52px 1fr;height:100%;}
+  #topbar{display:flex;align-items:center;gap:10px;padding:0 14px;background:var(--panel);
+    border-bottom:1px solid var(--border);}
+  .brand{font-weight:800;letter-spacing:.02em;color:var(--accent);margin-right:6px;white-space:nowrap;}
+  .btn{padding:7px 13px;border-radius:var(--radius-md);border:1px solid var(--border);
+    background:var(--panel-2);color:var(--text);cursor:pointer;font-family:inherit;font-size:12px;
+    font-weight:600;transition:all .18s var(--ease);white-space:nowrap;}
+  .btn:hover{border-color:var(--accent);background:rgba(255,255,255,.05);transform:translateY(-1px);}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#1a1a1a;border-color:transparent;}
+  .btn.on{border-color:var(--accent);color:var(--accent);}
+  .spacer{flex:1;}
+  select,input[type=text]{background:var(--panel-2);color:var(--text);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:7px 9px;font-family:inherit;font-size:12px;}
+  select:focus,input:focus{outline:none;border-color:var(--accent);}
+
+  #main{display:grid;grid-template-columns:210px 1fr 290px;min-height:0;}
+  .panel{background:var(--panel);overflow-y:auto;padding:12px;}
+  #left{border-right:1px solid var(--border);}
+  #right{border-left:1px solid var(--border);}
+  .sec{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--text-2);margin:14px 0 8px;}
+  .sec:first-child{margin-top:0;}
+
+  .palette{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+  .pal-card{background:var(--panel-2);border:1px solid var(--border);border-radius:var(--radius-md);
+    padding:9px 5px;text-align:center;cursor:pointer;transition:all .18s var(--ease);}
+  .pal-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:var(--shadow-soft);}
+  .pal-ico{font-size:19px;line-height:1.1;}
+  .pal-lbl{font-size:10px;color:var(--text-2);margin-top:4px;line-height:1.25;}
+
+  #viewport{position:relative;background:var(--viewport-bg);min-width:0;}
+  #renderCanvas{width:100%;height:100%;display:block;outline:none;touch-action:none;}
+  #hud{position:absolute;top:10px;left:10px;background:rgba(18,18,20,.78);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:5px 10px;font-size:11px;color:var(--text-2);
+    backdrop-filter:blur(6px);pointer-events:none;}
+
+  .field{margin-bottom:10px;}
+  .field label{display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;font-weight:600;}
+  .field input[type=text]{width:100%;}
+  .row{display:flex;align-items:center;gap:8px;}
+  input[type=color]{width:38px;height:30px;padding:0;border:1px solid var(--border);
+    border-radius:var(--radius-sm);background:var(--panel-2);cursor:pointer;}
+  .hexlbl{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--text-2);}
+  .check{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:12px;}
+
+  .acc{background:var(--panel-2);border:1px solid var(--border);border-radius:var(--radius-md);
+    padding:9px 10px;margin-bottom:7px;}
+  .acc-head{display:flex;align-items:center;gap:7px;}
+  .acc-name{font-weight:700;font-size:12px;flex:1;}
+  .acc-del{background:none;border:none;color:var(--text-2);cursor:pointer;font-size:14px;padding:2px 4px;
+    border-radius:6px;transition:all .15s var(--ease);}
+  .acc-del:hover{color:var(--danger);background:rgba(217,112,124,.12);}
+  .acc-opt{display:flex;align-items:center;gap:8px;margin-top:7px;}
+  .acc-opt label{font-size:11px;color:var(--text-2);min-width:56px;}
+  .acc-opt select,.acc-opt input{flex:1;}
+  .empty{color:var(--text-2);font-size:11px;font-style:italic;padding:8px 2px;line-height:1.5;}
+
+  #overlay{position:fixed;inset:0;background:rgba(0,0,0,.62);display:none;align-items:center;
+    justify-content:center;z-index:50;backdrop-filter:blur(3px);}
+  #overlay.show{display:flex;}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-md);
+    padding:18px;width:min(640px,92vw);box-shadow:var(--shadow-soft);}
+  .modal h3{margin:0 0 4px;font-size:15px;}
+  .modal p{margin:0 0 12px;color:var(--text-2);font-size:12px;line-height:1.55;}
+  .modal textarea{width:100%;height:130px;background:var(--viewport-bg);color:var(--text);
+    border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;
+    font-family:ui-monospace,Consolas,monospace;font-size:11.5px;resize:vertical;line-height:1.5;}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;}
+
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);
+    background:var(--panel);border:1px solid var(--accent);color:var(--text);padding:9px 16px;
+    border-radius:var(--radius-md);font-size:12px;font-weight:600;opacity:0;pointer-events:none;
+    transition:all .25s var(--ease);z-index:60;box-shadow:var(--shadow-soft);}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="brand">◈ ÉDITEUR DE PERSONNAGES</div>
+    <select id="loadAgent" title="Repartir d'un agent existant"></select>
+    <button class="btn" id="btnNew">Nouveau</button>
+    <div class="spacer"></div>
+    <button class="btn" id="btnWalk">▶ Marche</button>
+    <button class="btn" id="btnSpin">⟳ Rotation</button>
+    <button class="btn" id="btnSave">Enregistrer</button>
+    <button class="btn primary" id="btnExport">Exporter</button>
+  </div>
+  <div id="main">
+    <div class="panel" id="left">
+      <div class="sec">Pièces à ajouter</div>
+      <div class="palette" id="palette"></div>
+      <div class="sec">Mes personnages</div>
+      <div id="savedList"></div>
+    </div>
+    <div id="viewport">
+      <canvas id="renderCanvas"></canvas>
+      <div id="hud">Clic gauche : tourner · Molette : zoom</div>
+    </div>
+    <div class="panel" id="right">
+      <div class="sec">Identité</div>
+      <div class="field">
+        <label for="fName">Nom du personnage</label>
+        <input type="text" id="fName" placeholder="Ex. Nyxara">
+      </div>
+      <div class="field">
+        <label>Couleur principale — gilet, pantalon, pièces de silhouette</label>
+        <div class="row"><input type="color" id="fPrimary"><span class="hexlbl" id="lblPrimary"></span></div>
+      </div>
+      <div class="field">
+        <label>Couleur d'accent — visière, pièce de rôle, teinte d'arme</label>
+        <div class="row"><input type="color" id="fAccent"><span class="hexlbl" id="lblAccent"></span></div>
+      </div>
+      <div class="field">
+        <label class="check"><input type="checkbox" id="fGlow"> Visière lumineuse</label>
+      </div>
+      <div class="sec">Tête</div>
+      <div class="field">
+        <label for="fHead">Type</label>
+        <select id="fHead" style="width:100%">
+          <option value="face">Visage</option>
+          <option value="balaclava">Cagoule + visière</option>
+        </select>
+      </div>
+      <div class="field" id="rowHairStyle">
+        <label for="fHair">Coiffure</label>
+        <select id="fHair" style="width:100%"></select>
+      </div>
+      <div class="field" id="rowHairColor">
+        <label>Couleur de cheveux</label>
+        <div class="row"><input type="color" id="fHairColor"><span class="hexlbl" id="lblHairColor"></span></div>
+      </div>
+      <div class="field">
+        <label class="check"><input type="checkbox" id="fMarkings"> Marquages d'équipe (brassard, insigne)</label>
+      </div>
+      <div class="sec">Pièces posées</div>
+      <div id="accList"></div>
+    </div>
+  </div>
+</div>
+
+<div id="overlay">
+  <div class="modal">
+    <h3 id="modalTitle">Exporter le personnage</h3>
+    <p id="modalDesc">À coller dans <code>AGENT_VISUAL_THEME</code> (valorant_match_engine.js) et dans la table équivalente de <code>character_assets_babylon.js</code>.</p>
+    <textarea id="modalText" spellcheck="false"></textarea>
+    <div class="modal-actions">
+      <button class="btn" id="btnCopy">Copier</button>
+      <button class="btn" id="btnDownload">Télécharger .json</button>
+      <button class="btn primary" id="btnCloseModal">Fermer</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script src="vendor/babylon/babylon.js"></script>
+<script src="character_assets_babylon.js"></script>
+<script>
+"use strict";
+/* ============================================================
+   ÉDITEUR DE PERSONNAGES
+
+   Ne contient AUCUNE géométrie de personnage : tout vient de
+   character_assets_babylon.js, volontairement, pour que l'aperçu montre
+   exactement ce que le jeu affichera. Si une pièce manque ici, c'est au
+   module partagé qu'il faut l'ajouter — jamais à cet écran.
+   ============================================================ */
+const CA = window.CharacterAssets;
+
+/* ---------- État courant ---------- */
+const DEFAULT_CHAR = { name:'Nouveau', primary:0x6b1f1f, accent:0xd8d8d8, glow:false,
+  // markings à false par défaut : brassard et insigne sont des repères de
+  // lisibilité pour le match, pas des vêtements — ils encombrent la
+  // silhouette quand on dessine une tenue.
+  headStyle:'face', hairStyle:'court', hairColor:0x2b2118, markings:false, accessories:[] };
+let current = JSON.parse(JSON.stringify(DEFAULT_CHAR));
+let built = null;          // { root, parts, materials } renvoyé par le module
+let walking = true, spinning = true, walkPhase = 0;
+
+/* ---------- Scène ---------- */
+const canvas = document.getElementById('renderCanvas');
+const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer:true, stencil:true });
+const scene = new BABYLON.Scene(engine);
+scene.clearColor = new BABYLON.Color4(0.051,0.051,0.059,1);
+
+const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/2 + 0.55, Math.PI/2.42, 3.1,
+  new BABYLON.Vector3(0,0.88,0), scene);
+camera.attachControl(canvas, true);
+camera.lowerRadiusLimit = 1.8; camera.upperRadiusLimit = 12;
+camera.upperBetaLimit = Math.PI/2 + 0.22;  // empêche de passer sous le sol
+camera.wheelDeltaPercentage = 0.02;
+
+// Même ambiance lumineuse que le jeu (ACES + légère exposition) pour que
+// les couleurs choisies ici correspondent à celles rendues en match.
+scene.imageProcessingConfiguration.toneMappingEnabled = true;
+scene.imageProcessingConfiguration.toneMappingType = BABYLON.ImageProcessingConfiguration.TONEMAPPING_ACES;
+scene.imageProcessingConfiguration.exposure = 1.25;
+scene.imageProcessingConfiguration.contrast = 1.05;
+
+const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0,1,0), scene);
+hemi.intensity = 0.55; hemi.groundColor = new BABYLON.Color3(0.16,0.15,0.14);
+const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-0.6,-1,-0.45).normalize(), scene);
+sun.position = new BABYLON.Vector3(6,10,5); sun.intensity = 2.1;
+const rim = new BABYLON.DirectionalLight('rim', new BABYLON.Vector3(0.7,-0.25,0.6).normalize(), scene);
+rim.intensity = 0.6; rim.diffuse = new BABYLON.Color3(0.95,0.85,0.65); // liseré chaud, détache la silhouette du fond
+
+const shadowGen = new BABYLON.ShadowGenerator(1024, sun);
+shadowGen.useBlurExponentialShadowMap = true; shadowGen.blurKernel = 24;
+
+// Socle : disque neutre + grille, uniquement pour ancrer le personnage.
+const podium = BABYLON.MeshBuilder.CreateDisc('podium', { radius:1.05, tessellation:64 }, scene);
+podium.rotation.x = Math.PI/2; podium.position.y = 0.001;
+const podMat = new BABYLON.PBRMaterial('podMat', scene);
+podMat.albedoColor = new BABYLON.Color3(0.075,0.075,0.085);
+podMat.roughness = 0.85; podMat.metallic = 0; podMat.backFaceCulling = false;
+podium.material = podMat; podium.receiveShadows = true;
+
+/* ---------- Construction / reconstruction ----------
+   L'éditeur reconstruit tout le personnage à chaque changement plutôt que
+   de modifier les meshes en place : c'est le module partagé qui décide de
+   la géométrie, et lui seul — reproduire ici sa logique de mise à jour
+   rouvrirait précisément la porte à la divergence qu'on veut éviter. */
+function rebuild(){
+  if(built && built.root) built.root.dispose(false, true);
+  const theme = {
+    primary: current.primary,
+    accent: current.accent,
+    glow: !!current.glow,
+    accessories: current.accessories,
+  };
+  built = CA.buildCharacter(scene, {
+    theme, name:'preview',
+    seed: current.name || 'preview',   // peau stable tant que le nom ne change pas
+    teamColor: current.accent,
+    withRing: false,                   // l'anneau d'équipe n'est pas une pièce de tenue
+    withGun: true,
+    headStyle: current.headStyle,
+    hairStyle: current.hairStyle,
+    hairColor: current.hairColor,
+    withTeamMarkings: current.markings !== false,
+  });
+  built.root.getChildMeshes().forEach(m=>{ shadowGen.addShadowCaster(m); });
+}
+
+/* ---------- Rendu ---------- */
+engine.runRenderLoop(()=>{
+  const dt = engine.getDeltaTime()/1000;
+  if(built){
+    if(spinning) built.root.rotation.y += dt*0.55;
+    walkPhase += dt * (walking ? 9 : 0);
+    CA.poseWalk(built.parts, walkPhase, walking);
+  }
+  scene.render();
+});
+window.addEventListener('resize', ()=> engine.resize());
+
+/* ---------- Interface : palette de pièces ---------- */
+const paletteEl = document.getElementById('palette');
+CA.ACCESSORY_TYPES.forEach(def=>{
+  const card = document.createElement('div');
+  card.className = 'pal-card';
+  card.innerHTML = '<div class="pal-ico">'+def.icon+'</div><div class="pal-lbl">'+def.label+'</div>';
+  card.title = 'Ajouter : '+def.label;
+  card.onclick = ()=>{
+    const acc = { type:def.type };
+    def.options.forEach(o=>{ if(o.def !== undefined) acc[o.key] = o.def; });
+    current.accessories.push(acc);
+    renderAccList(); rebuild();
+    toast(def.label+' ajoutée');
+  };
+  paletteEl.appendChild(card);
+});
+
+/* ---------- Interface : pièces posées ----------
+   Chaque pièce affiche uniquement les réglages que le module déclare pour
+   son type (ACCESSORY_TYPES), donc l'écran ne peut pas proposer une option
+   que le constructeur ignorerait. */
+const accListEl = document.getElementById('accList');
+function renderAccList(){
+  accListEl.innerHTML = '';
+  if(!current.accessories.length){
+    accListEl.innerHTML = '<div class="empty">Aucune pièce. Clique dans « Pièces à ajouter » à gauche pour habiller le personnage.</div>';
+    return;
+  }
+  current.accessories.forEach((acc, idx)=>{
+    const def = CA.ACCESSORY_TYPES.find(d=>d.type===acc.type);
+    if(!def) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'acc';
+    const head = document.createElement('div');
+    head.className = 'acc-head';
+    head.innerHTML = '<span>'+def.icon+'</span><span class="acc-name">'+def.label+'</span>';
+    const del = document.createElement('button');
+    del.className = 'acc-del'; del.textContent = '✕'; del.title = 'Retirer';
+    del.onclick = ()=>{ current.accessories.splice(idx,1); renderAccList(); rebuild(); };
+    head.appendChild(del);
+    wrap.appendChild(head);
+
+    def.options.forEach(opt=>{
+      const row = document.createElement('div');
+      row.className = 'acc-opt';
+      const lab = document.createElement('label'); lab.textContent = opt.label;
+      row.appendChild(lab);
+      let input;
+      if(opt.kind === 'choice'){
+        input = document.createElement('select');
+        opt.values.forEach((v,i)=>{
+          const o = document.createElement('option');
+          o.value = v; o.textContent = (opt.labels && opt.labels[i]) || v;
+          input.appendChild(o);
+        });
+        input.value = acc[opt.key] ?? opt.def;
+        input.onchange = ()=>{ acc[opt.key] = input.value; rebuild(); };
+      } else if(opt.kind === 'int'){
+        input = document.createElement('input');
+        input.type = 'range'; input.min = opt.min; input.max = opt.max; input.step = 1;
+        input.value = acc[opt.key] ?? opt.def;
+        const val = document.createElement('span');
+        val.className = 'hexlbl'; val.textContent = input.value;
+        input.oninput = ()=>{ acc[opt.key] = +input.value; val.textContent = input.value; rebuild(); };
+        row.appendChild(input); row.appendChild(val);
+        wrap.appendChild(row);
+        return;
+      } else { // bool
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = !!(acc[opt.key] ?? opt.def);
+        input.onchange = ()=>{ acc[opt.key] = input.checked; rebuild(); };
+      }
+      row.appendChild(input);
+      wrap.appendChild(row);
+    });
+    accListEl.appendChild(wrap);
+  });
+}
+
+/* ---------- Interface : identité ---------- */
+const fName = document.getElementById('fName');
+const fPrimary = document.getElementById('fPrimary'), lblPrimary = document.getElementById('lblPrimary');
+const fAccent = document.getElementById('fAccent'), lblAccent = document.getElementById('lblAccent');
+const fGlow = document.getElementById('fGlow');
+
+const hexStr = n => '#'+(n>>>0).toString(16).padStart(6,'0');
+const hexNum = s => parseInt(s.replace('#',''), 16);
+
+const fHead = document.getElementById('fHead');
+const fHair = document.getElementById('fHair');
+const fHairColor = document.getElementById('fHairColor'), lblHairColor = document.getElementById('lblHairColor');
+const fMarkings = document.getElementById('fMarkings');
+CA.HAIR_STYLES.forEach(s=>{
+  const o = document.createElement('option'); o.value = s.id; o.textContent = s.label; fHair.appendChild(o);
+});
+
+function syncFields(){
+  fName.value = current.name;
+  fPrimary.value = hexStr(current.primary); lblPrimary.textContent = hexStr(current.primary).toUpperCase();
+  fAccent.value = hexStr(current.accent);   lblAccent.textContent = hexStr(current.accent).toUpperCase();
+  fGlow.checked = !!current.glow;
+  fHead.value = current.headStyle || 'face';
+  fHair.value = current.hairStyle || 'court';
+  fHairColor.value = hexStr(current.hairColor ?? 0x2b2118);
+  lblHairColor.textContent = fHairColor.value.toUpperCase();
+  fMarkings.checked = current.markings !== false;
+  // Coiffure et couleur n'ont aucun effet sous une cagoule : on masque les
+  // réglages plutôt que de laisser croire qu'ils agissent.
+  const masked = (current.headStyle === 'balaclava');
+  document.getElementById('rowHairStyle').style.display = masked ? 'none' : '';
+  document.getElementById('rowHairColor').style.display = masked ? 'none' : '';
+}
+fHead.onchange = ()=>{ current.headStyle = fHead.value; syncFields(); rebuild(); };
+fHair.onchange = ()=>{ current.hairStyle = fHair.value; rebuild(); };
+fHairColor.oninput = ()=>{ current.hairColor = hexNum(fHairColor.value); lblHairColor.textContent = fHairColor.value.toUpperCase(); rebuild(); };
+fMarkings.onchange = ()=>{ current.markings = fMarkings.checked; rebuild(); };
+fName.oninput = ()=>{ current.name = fName.value; };
+// La peau dérive de la graine = le nom : on ne reconstruit qu'à la validation
+// du nom, sinon le personnage changerait de teint à chaque lettre tapée.
+fName.onchange = ()=> rebuild();
+fPrimary.oninput = ()=>{ current.primary = hexNum(fPrimary.value); lblPrimary.textContent = fPrimary.value.toUpperCase(); rebuild(); };
+fAccent.oninput = ()=>{ current.accent = hexNum(fAccent.value); lblAccent.textContent = fAccent.value.toUpperCase(); rebuild(); };
+fGlow.onchange = ()=>{ current.glow = fGlow.checked; rebuild(); };
+
+/* ---------- Charger un agent existant ---------- */
+const loadSel = document.getElementById('loadAgent');
+loadSel.innerHTML = '<option value="">— Partir d\'un agent —</option>';
+Object.keys(CA.AGENT_VISUAL_THEME).sort().forEach(n=>{
+  const o = document.createElement('option'); o.value = n; o.textContent = n; loadSel.appendChild(o);
+});
+loadSel.onchange = ()=>{
+  const n = loadSel.value;
+  if(!n) return;
+  const t = CA.AGENT_VISUAL_THEME[n];
+  // Les thèmes du moteur ne portent pas encore tête/coiffure : on complète
+  // avec les valeurs par défaut plutôt que de laisser des champs vides.
+  current = { name:n, primary:t.primary, accent:t.accent, glow:!!t.glow,
+    headStyle: t.headStyle || DEFAULT_CHAR.headStyle,
+    hairStyle: t.hairStyle || DEFAULT_CHAR.hairStyle,
+    hairColor: t.hairColor ?? DEFAULT_CHAR.hairColor,
+    markings: true,
+    accessories: JSON.parse(JSON.stringify(t.accessories||[])) };
+  syncFields(); renderAccList(); rebuild();
+  toast(n+' chargé');
+};
+
+document.getElementById('btnNew').onclick = ()=>{
+  current = JSON.parse(JSON.stringify(DEFAULT_CHAR));
+  loadSel.value = '';
+  syncFields(); renderAccList(); rebuild();
+};
+
+/* ---------- Aperçu : marche / rotation ---------- */
+const btnWalk = document.getElementById('btnWalk'), btnSpin = document.getElementById('btnSpin');
+function syncToggles(){
+  btnWalk.classList.toggle('on', walking);
+  btnSpin.classList.toggle('on', spinning);
+}
+btnWalk.onclick = ()=>{ walking = !walking; syncToggles(); };
+btnSpin.onclick = ()=>{ spinning = !spinning; syncToggles(); };
+
+/* ---------- Bibliothèque locale ----------
+   localStorage seulement : le jeu est 100% hors-ligne, il n'y a aucun
+   serveur où déposer quoi que ce soit. L'export texte reste le vrai
+   chemin pour faire entrer un personnage dans le jeu. */
+const LS_KEY = 'characterEditor.saved.v1';
+function loadSaved(){ try { return JSON.parse(localStorage.getItem(LS_KEY)) || []; } catch(e){ return []; } }
+function writeSaved(list){ try { localStorage.setItem(LS_KEY, JSON.stringify(list)); } catch(e){ toast('Sauvegarde impossible'); } }
+function renderSaved(){
+  const list = loadSaved();
+  const el = document.getElementById('savedList');
+  el.innerHTML = '';
+  if(!list.length){ el.innerHTML = '<div class="empty">Rien d\'enregistré pour l\'instant.</div>'; return; }
+  list.forEach((c,i)=>{
+    const row = document.createElement('div');
+    row.className = 'acc';
+    row.innerHTML = '<div class="acc-head"><span class="acc-name">'+(c.name||'Sans nom')+'</span></div>';
+    row.style.cursor = 'pointer';
+    row.onclick = ()=>{ current = JSON.parse(JSON.stringify(c)); syncFields(); renderAccList(); rebuild(); toast(c.name+' chargé'); };
+    const del = document.createElement('button');
+    del.className = 'acc-del'; del.textContent = '✕'; del.title = 'Supprimer';
+    del.onclick = (e)=>{ e.stopPropagation(); const l = loadSaved(); l.splice(i,1); writeSaved(l); renderSaved(); };
+    row.querySelector('.acc-head').appendChild(del);
+    el.appendChild(row);
+  });
+}
+document.getElementById('btnSave').onclick = ()=>{
+  if(!current.name || !current.name.trim()){ toast('Donne-lui un nom d\'abord'); fName.focus(); return; }
+  const list = loadSaved();
+  const at = list.findIndex(c=>c.name === current.name);
+  const copy = JSON.parse(JSON.stringify(current));
+  if(at >= 0) list[at] = copy; else list.push(copy);
+  writeSaved(list); renderSaved();
+  toast(current.name+' enregistré');
+};
+
+/* ---------- Export ---------- */
+const overlay = document.getElementById('overlay'), modalText = document.getElementById('modalText');
+document.getElementById('btnExport').onclick = ()=>{
+  const name = (current.name||'Nouveau').replace(/[^A-Za-z0-9_]/g,'') || 'Nouveau';
+  modalText.value = CA.themeToSource(name, current);
+  overlay.classList.add('show');
+  modalText.select();
+};
+document.getElementById('btnCloseModal').onclick = ()=> overlay.classList.remove('show');
+overlay.onclick = (e)=>{ if(e.target === overlay) overlay.classList.remove('show'); };
+document.getElementById('btnCopy').onclick = ()=>{
+  modalText.select();
+  navigator.clipboard.writeText(modalText.value)
+    .then(()=> toast('Copié'))
+    .catch(()=>{ document.execCommand('copy'); toast('Copié'); });
+};
+document.getElementById('btnDownload').onclick = ()=>{
+  const blob = new Blob([JSON.stringify(current, null, 2)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (current.name||'personnage')+'.json';
+  a.click();
+  setTimeout(()=> URL.revokeObjectURL(a.href), 1000);
+};
+
+/* ---------- Toast ---------- */
+let toastTimer = null;
+function toast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=> el.classList.remove('show'), 1800);
+}
+
+/* ---------- Démarrage ---------- */
+syncFields(); syncToggles(); renderAccList(); renderSaved(); rebuild();
+</script>
+</body>
+</html>

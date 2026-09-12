@@ -1534,12 +1534,6 @@ input.field-input[type="number"]{
 .ceo-card-archetype{font-size:11.5px;color:var(--accent-2);}
 .ceo-card-passive{font-size:10px;color:var(--text-secondary);margin-top:3px;font-style:italic;display:flex;align-items:center;gap:5px;}
 .ceo-card-passive i{font-size:9px;opacity:.7;}
-.advisor-card{transition:box-shadow .15s var(--ease),transform .15s var(--ease);}
-.advisor-card:hover{box-shadow:var(--shadow-md);transform:translateY(-2px);}
-.advisor-preview-row{display:flex;align-items:center;gap:12px;}
-.advisor-preview-info{flex:1;min-width:0;}
-.advisor-preview-name{font-family:'Fraunces',sans-serif;font-size:15px;font-weight:700;}
-.advisor-preview-specialty{font-size:11.5px;color:var(--accent-2);margin-top:2px;}
 .stat-label{font-size:11.5px;color:var(--text-secondary);font-weight:700;text-transform:uppercase;letter-spacing:.05em;}
 .stat-value{font-family:'Fraunces',sans-serif;font-size:28px;font-weight:700;letter-spacing:.01em;}
 .stat-sub{font-size:12px;color:var(--text-secondary);}
@@ -2003,9 +1997,10 @@ tbody tr:hover{background:rgba(255,255,255,0.02);}
    rester cohérent avec les coins nets adoptés partout ailleurs dans cette
    refonte (cartes, boutons, bandeaux). */
 .badge{
-  display:inline-flex;align-items:center;gap:5px;
-  padding:4px 10px;border-radius:4px;font-size:12px;font-weight:600;
-  letter-spacing:.01em;
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;
+  padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;
+  line-height:1.1;letter-spacing:.01em;
+  white-space:nowrap;
 }
 /* Alternative légère au badge plein — point coloré + texte, sur le modèle
    des statuts "Out"/"Doubtful" de Football Manager : réservée aux états
@@ -2195,7 +2190,12 @@ tbody tr:hover{background:rgba(255,255,255,0.02);}
 
 .badge-blue{background:rgba(56,189,248,.14);color:#38BDF8;}
 .badge-purple{background:rgba(192,132,252,.14);color:#C084FC;}
-.badge-green{background:rgba(34,197,94,.14);color:var(--success);}
+.badge-green{
+  background:linear-gradient(180deg, rgba(34,197,94,.20), rgba(34,197,94,.12));
+  color:var(--success);
+  border:1px solid rgba(34,197,94,.28);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
+}
 .badge-orange{background:rgba(245,158,11,.14);color:var(--info);}
 .badge-red{background:rgba(239,68,68,.14);color:var(--error);}
 .badge-grey{background:rgba(255,255,255,.06);color:var(--text-secondary);}
@@ -2261,6 +2261,80 @@ tbody tr:hover{background:rgba(255,255,255,0.02);}
   padding:24px;
   animation:slideUp .22s var(--ease);
 }
+
+/* Écran "Charger une partie" (voir openLoadGameModal, script.js) — liste des
+   sauvegardes/versions/points de restauration + détail, dans le même thème
+   charbon+doré que le reste du jeu. */
+.modal-panel.saveslot-modal{max-width:760px;}
+@media (max-width:820px){ .modal-panel.saveslot-modal{max-width:94vw;} }
+.saveslot-storage-line{display:flex;align-items:center;gap:12px;margin-bottom:16px;font-size:12.5px;color:var(--text-secondary);}
+.saveslot-storage-bar{flex:1;height:6px;border-radius:3px;background:var(--bg-secondary);overflow:hidden;}
+.saveslot-storage-fill{height:100%;background:linear-gradient(90deg,var(--accent-2),var(--accent));border-radius:3px;}
+.saveslot-body{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;min-height:280px;max-height:52vh;}
+@media (max-width:640px){ .saveslot-body{grid-template-columns:1fr;} }
+.saveslot-list{list-style:none;margin:0;padding:0;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);}
+.saveslot-row{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;}
+.saveslot-row:last-child{border-bottom:none;}
+.saveslot-row:hover{background:var(--accent-tint-weak);}
+.saveslot-row.selected{background:var(--accent-tint);}
+.saveslot-row-main{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+.saveslot-row-name{font-weight:600;font-size:13.5px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.saveslot-row-meta{display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-secondary);}
+.saveslot-badge{flex-shrink:0;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;background:var(--accent-2-tint);color:var(--accent-2);}
+.saveslot-badge-auto{background:var(--bg-secondary);color:var(--text-secondary);}
+.saveslot-empty,.saveslot-detail-empty{color:var(--text-secondary);font-size:13px;padding:14px;text-align:center;}
+.saveslot-detail{border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;overflow-y:auto;}
+.saveslot-detail-name{font-weight:700;font-size:15px;margin-bottom:10px;color:var(--accent-2);}
+.saveslot-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;}
+.text-input-modal-label{display:block;font-size:12.5px;color:var(--text-secondary);margin-bottom:6px;}
+
+.custom-confirm-overlay{
+  position:fixed; inset:0; z-index:9999;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(8,10,16,.72);
+  backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);
+  padding:20px;
+  opacity:0; transition:opacity .18s ease;
+}
+.custom-confirm-overlay.show{ opacity:1; }
+.custom-confirm-window{
+  width:min(100%, 440px);
+  background:rgba(16,18,24,.96);
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:14px;
+  box-shadow:0 18px 40px rgba(0,0,0,.45);
+  padding:18px 20px 16px;
+  color:var(--text-primary);
+  transform:translateY(8px) scale(.98);
+  transition:transform .18s ease;
+}
+.custom-confirm-overlay.show .custom-confirm-window{
+  transform:translateY(0) scale(1);
+}
+.custom-confirm-title{
+  display:block; font-size:15px; font-weight:700; letter-spacing:.01em;
+  color:var(--text-primary); margin-bottom:16px;
+}
+.custom-confirm-body p{
+  margin:0; font-size:13.5px; line-height:1.5; color:var(--text-secondary);
+}
+.custom-confirm-actions{
+  display:flex; justify-content:flex-end; gap:12px; margin-top:22px;
+}
+.custom-confirm-btn{
+  border:1px solid rgba(255,255,255,.12);
+  background:rgba(255,255,255,.04);
+  color:var(--text-primary); border-radius:8px; padding:8px 16px;
+  font-size:13px; font-weight:600; cursor:pointer;
+  transition:all .15s ease; min-width:90px;
+}
+.custom-confirm-btn:hover{ border-color:rgba(255,255,255,.18); }
+.custom-confirm-btn-primary{
+  background:linear-gradient(180deg, rgba(240,180,94,.9), rgba(181,122,42,.88));
+  border-color:rgba(230,176,87,.7); color:#1d1a15; box-shadow:0 8px 18px rgba(201,146,69,.25);
+}
+.custom-confirm-btn-primary:hover{ filter:brightness(1.05); }
+.custom-confirm-btn-ghost{}
 
 /* ---------------------------------------------------------------
    FAILLITE DÉFINITIVE (GAME OVER) — pop-up plein écran non fermable,
@@ -3525,8 +3599,9 @@ body.reduce-motion .scroll-more-hint.visible{animation:none;}
 }
 
 .vct-slot-leagues{
-  padding:18px 28px;overflow-y:auto;flex:1;
+  padding:18px 20px 20px;overflow-y:auto;flex:1;
   display:flex;flex-direction:column;gap:18px;
+  background:linear-gradient(180deg, rgba(255,255,255,0.015), rgba(255,255,255,0));
 }
 
 /* ---- Négociation joueur "pro" (façon FM26) : fiche joueur + budgets à
@@ -3565,53 +3640,77 @@ body.reduce-motion .scroll-more-hint.visible{animation:none;}
   .nego-pro-feed{ max-height:280px; }
 }
 .vct-slot-league{
-  background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);
-  padding:14px 16px;
+  background:linear-gradient(180deg, rgba(255,255,255,0.018), rgba(255,255,255,0.006));
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:12px 12px 10px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.03), 0 8px 18px rgba(0,0,0,0.16);
 }
 .vct-slot-league-header{
   display:flex;align-items:center;justify-content:space-between;
   margin-bottom:10px;
+  padding-bottom:8px;
+  border-bottom:1px solid rgba(255,255,255,0.06);
 }
-.vct-slot-league-header span:first-child{font-weight:700;font-size:14.5px;}
+.vct-slot-league-header span:first-child{
+  font-weight:700;
+  font-size:13.5px;
+  letter-spacing:-0.02em;
+  color:var(--text-primary);
+}
 .vct-slot-price{
-  font-size:11px;font-weight:600;color:var(--accent-2);
-  background:rgba(var(--accent-rgb),0.12);padding:2px 8px;border-radius:999px;
-  width:fit-content;margin-top:3px;
+  display:inline-flex;align-items:center;justify-content:flex-start;
+  width:fit-content;max-width:100%;
+  margin-top:4px;
+  font-size:10px;font-weight:700;color:var(--text-secondary);
+  background:transparent;
+  padding:0;
+  border-radius:0;
+  border:none;
+}
+.vct-slot-price .badge{
+  display:inline-flex;max-width:100%;
+  padding:3px 8px;font-size:10px;line-height:1.15;
+  border-radius:999px;
+  min-height:20px;
 }
 .vct-slot-teams{
-  display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:9px;
 }
-/* Avant : simple rectangle plat --radius-sm (8px), fond uni, texte seul —
-   signalé "pas très beau les encadrés carrés". Coin plus généreux
-   (--radius-md), relief (ombre + liseré du haut) et un médaillon
-   d'initiale d'équipe (même esprit que .ceo-avatar-thumb : un vrai badge
-   plutôt qu'un bloc de texte nu), toujours dans la palette charbon/or —
-   aucune teinte par équipe. */
+/* Cartes plus compactes et plus lisibles : taille réduite, badge + texte bien cadrés. */
 .vct-slot-team-btn{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
-  background:var(--bg-secondary);border:1px solid var(--border);
-  border-radius:var(--radius-md);padding:11px 14px;
-  font-size:13px;font-weight:500;text-align:left;
+  position:relative;overflow:hidden;
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:12px;padding:9px 10px 9px 9px;
+  font-size:12.5px;font-weight:500;text-align:left;
   box-shadow:var(--shadow-sm);
   transition:border-color .2s ease, transform .15s ease, background .2s ease, box-shadow .2s ease;
 }
+.vct-slot-team-btn::before{
+  content:'';position:absolute;inset:0 auto 0 0;width:4px;
+  background:linear-gradient(180deg,var(--accent),var(--accent-2));
+  opacity:0;transition:opacity .2s ease;
+}
 .vct-slot-team-btn:hover{
-  border-color:rgba(var(--accent-rgb),0.5);background:rgba(var(--accent-rgb),0.08);
-  transform:translateY(-2px);box-shadow:var(--shadow-md);
+  border-color:rgba(var(--accent-rgb),0.45);background:rgba(var(--accent-rgb),0.06);
+  transform:translateY(-1px);box-shadow:0 10px 22px rgba(0,0,0,0.18);
 }
-.vct-slot-team-info{display:flex;align-items:center;gap:10px;min-width:0;}
+.vct-slot-team-btn:hover::before{opacity:1;}
+.vct-slot-team-info{display:flex;align-items:center;gap:0;min-width:0;flex:1;}
 .vct-slot-team-badge{
-  width:34px;height:34px;border-radius:50%;flex-shrink:0;
-  display:flex;align-items:center;justify-content:center;
-  font-size:13px;font-weight:700;color:var(--accent);
-  background:radial-gradient(circle at 35% 30%, rgba(var(--accent-rgb),.22), var(--card) 75%);
-  border:1px solid rgba(var(--accent-rgb),.3);
+  display:none;
 }
-.vct-slot-team-text{display:flex;flex-direction:column;min-width:0;}
-.vct-slot-team-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.vct-slot-team-text{display:flex;flex:1;flex-direction:column;min-width:0;}
+.vct-slot-team-name{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-weight:700;letter-spacing:-0.01em;font-size:12.5px;
+}
 .vct-slot-team-cta{
-  color:var(--text-secondary);font-size:11.5px;white-space:nowrap;
+  color:var(--text-secondary);font-size:10.5px;white-space:nowrap;
   display:flex;align-items:center;gap:5px;
+  text-transform:uppercase;letter-spacing:0.04em;
 }
 .vct-slot-team-btn:hover .vct-slot-team-cta{color:var(--accent-2);}
 
@@ -4273,13 +4372,20 @@ body.reduce-motion .scroll-more-hint.visible{animation:none;}
 .opt-lang-option{
   display:flex;align-items:center;gap:10px;padding:14px 16px;border-radius:var(--radius-md);
   background:rgba(255,255,255,0.02);border:1px solid var(--border);font-weight:600;font-size:13.5px;
-  transition:all .2s var(--ease);
+  transition:all .2s var(--ease);cursor:pointer;
 }
 .opt-lang-option:hover{border-color:rgba(var(--accent-rgb),.4);}
 .opt-lang-option.active{
   background:rgba(var(--accent-rgb),.22);
   border-color:rgba(var(--accent-rgb),.5);
 }
+.opt-lang-option.disabled,
+.opt-lang-option:disabled{
+  opacity:.45;cursor:not-allowed;filter:grayscale(.8);border-color:var(--border);
+  background:rgba(255,255,255,0.01);
+}
+.opt-lang-option.disabled:hover,
+.opt-lang-option:disabled:hover{border-color:var(--border);}
 .opt-lang-flag{width:22px;height:16px;border-radius:2px;object-fit:cover;}
 
 .opt-note{
@@ -4288,6 +4394,11 @@ body.reduce-motion .scroll-more-hint.visible{animation:none;}
   font-size:12.5px;color:var(--text-secondary);
 }
 .opt-note i{color:var(--info);margin-top:1px;}
+
+.save-actions-panel{
+  display:flex;align-items:center;justify-content:flex-end;gap:12px;
+  margin-top:28px;padding-top:16px;border-top:1px solid var(--border);
+}
 
 .options-actions{
   display:flex;align-items:center;gap:12px;margin-top:22px;padding-top:22px;
@@ -4424,6 +4535,22 @@ body.colorblind-tritanopia .main-area, body.colorblind-tritanopia .menu-content,
 .main-area, .menu-content, .newgame-wrap, .options-wrap{
   filter: var(--content-filter, none);
 }
+body.quality-low .menu-bg-grid,
+body.quality-low .menu-glow,
+body.quality-low .menu-particles,
+body.quality-low .menu-scan,
+body.quality-low .menu-slash,
+body.quality-low .card-glow,
+body.quality-low .ambient-visual{ opacity:.25 !important; }
+body.quality-low .card,
+body.quality-low .profile-modal,
+body.quality-low .panel,
+body.quality-low .vct-slot-modal-inner{
+  box-shadow:none !important; border-color:rgba(255,255,255,.08) !important;
+}
+body.quality-medium .menu-bg-grid{ opacity:.7 !important; }
+body.quality-high .menu-bg-grid{ opacity:1 !important; }
+body.vsync-off .screen{ animation:none !important; }
 
 /* ---- Navigation du calendrier (mois précédent/suivant) ---- */
 .calendar-month-nav{display:flex;align-items:center;gap:10px;}

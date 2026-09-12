@@ -4,8 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Éditeur de carte 3D</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap" rel="stylesheet">
+<link href="vendor/fonts/fonts.css" rel="stylesheet">
 <style>
   /* Palette alignée sur celle du jeu (style.css racine) : charbon neutre +
      accent doré en deux nuances, reprise à l'identique (mêmes valeurs de
@@ -522,9 +521,9 @@
   // dès le départ pour que la barre reflète VRAIMENT tout ce qui reste à
   // charger, pas seulement les 3 premiers fichiers.
   const SCRIPTS = [
-    { url:'https://cdn.jsdelivr.net/npm/babylonjs@8.33.1/babylon.js', label:'Moteur 3D (Babylon.js)' },
-    { url:'https://cdn.jsdelivr.net/npm/babylonjs-loaders@8.33.1/babylonjs.loaders.min.js', label:'Chargeurs de modèles' },
-    { url:'https://cdn.jsdelivr.net/npm/babylonjs-materials@8.33.1/babylonjs.materials.min.js', label:'Matériaux' },
+    { url:'vendor/babylon/babylon.js', label:'Moteur 3D (Babylon.js)' },
+    { url:'vendor/babylon/babylonjs.loaders.min.js', label:'Chargeurs de modèles' },
+    { url:'vendor/babylon/babylonjs.materials.min.js', label:'Matériaux' },
   ];
   // Taille approximative de map_assets_babylon.js (mise à jour si le
   // fichier grossit significativement) — juste pour proportionner la

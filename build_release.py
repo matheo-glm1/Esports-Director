@@ -41,6 +41,35 @@ if not ESBUILD.exists():
           f"retélécharger si besoin.")
     sys.exit(1)
 
+# Ré-encodage des musiques : les .mp3 d'origine sont en 256/320 kbps (qualité
+# album) alors que ce sont des boucles d'ambiance jouées en fond de jeu. À
+# 128 kbps la différence est inaudible dans ces conditions, et le paquet perd
+# une quarantaine de Mo — ce qui le fait repasser sous la limite des 100 Mo par
+# fichier de GitHub. Les originaux ne sont JAMAIS modifiés : comme pour le JS,
+# le ré-encodage se fait sur la copie, dans le dossier temporaire.
+AUDIO_BITRATE = "128k"
+
+
+def find_ffmpeg():
+    """Cherche ffmpeg dans devtools/ (s'il y est déposé un jour, pour rendre le
+    build autonome comme esbuild), puis sur le PATH, puis dans les paquets
+    winget — après une installation par winget, le PATH n'est à jour que dans
+    les consoles ouvertes ensuite, donc le chercher là évite un faux négatif."""
+    local = PROJECT_ROOT / "devtools" / "ffmpeg.exe"
+    if local.exists():
+        return local
+    found = shutil.which("ffmpeg")
+    if found:
+        return Path(found)
+    packages = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+    if packages.is_dir():
+        for candidate in packages.glob("Gyan.FFmpeg*/**/ffmpeg.exe"):
+            return candidate
+    return None
+
+
+FFMPEG = find_ffmpeg()
+
 # Fichiers/dossiers du dépôt de dev à NE PAS inclure dans la version vendue.
 EXCLUDE_TOP_LEVEL = {
     ".claude", "__pycache__", ".git",
@@ -88,6 +117,16 @@ def process_file(src: Path, dst: Path, stats: dict):
     dst.parent.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower()
 
+    # Bibliothèques tierces rapatriées en local (vendor/) : recopiées telles
+    # quelles, jamais reminifiées. Elles sont déjà optimisées à la source, et
+    # les repasser au minifieur ne ferait que prendre le risque de casser un
+    # code qu'on ne maîtrise pas — esbuild renomme les fonctions, or certaines
+    # bibliothèques s'appuient dessus (constructor.name, enregistrement de
+    # types). Aucun gain à espérer, un vrai risque à courir.
+    if "vendor" in src.parts:
+        shutil.copy2(src, dst)
+        return
+
     if suffix == ".js":
         original = src.read_text(encoding="utf-8", errors="ignore")
         minified, ok = safe_minify_js(original, src.name)
@@ -113,6 +152,25 @@ def process_file(src: Path, dst: Path, stats: dict):
         stats["before"] += before_total
         stats["after"] += len(result)
 
+    elif suffix == ".mp3" and FFMPEG is not None:
+        proc = subprocess.run(
+            [str(FFMPEG), "-v", "error", "-y", "-i", str(src),
+             "-codec:a", "libmp3lame", "-b:a", AUDIO_BITRATE,
+             "-map_metadata", "0", str(dst)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        # Même principe que pour esbuild : au moindre pépin on garde
+        # l'original, plutôt que de risquer un fichier audio tronqué qui
+        # passerait inaperçu jusque chez les joueurs.
+        if proc.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+            print(f"  ! {src.name} : ffmpeg a échoué — conservé tel quel.\n"
+                  f"{(proc.stderr or '').strip()[:400]}")
+            shutil.copy2(src, dst)
+        else:
+            stats["audio_before"] += src.stat().st_size
+            stats["audio_after"] += dst.stat().st_size
+            stats["audio_files"] += 1
+
     else:
         shutil.copy2(src, dst)
 
@@ -122,11 +180,17 @@ def build():
     print(f"Version détectée : {version}")
     print(f"Dossier source   : {PROJECT_ROOT}")
 
+    if FFMPEG is None:
+        print("! ffmpeg introuvable : les musiques resteront en 256/320 kbps et le\n"
+              "  paquet dépassera les 100 Mo (limite GitHub par fichier).\n"
+              "  Pour l'installer :  winget install Gyan.FFmpeg")
+
     with tempfile.TemporaryDirectory(prefix="esports_director_build_") as tmp:
         staging = Path(tmp) / "game"
         staging.mkdir()
 
-        stats = {"before": 0, "after": 0, "minified_files": 0}
+        stats = {"before": 0, "after": 0, "minified_files": 0,
+                 "audio_before": 0, "audio_after": 0, "audio_files": 0}
 
         for item in PROJECT_ROOT.iterdir():
             if item.name in EXCLUDE_TOP_LEVEL:
@@ -155,6 +219,10 @@ def build():
         print(f"Fichiers JS minifiés : {stats['minified_files']}")
         print(f"Taille du code JS/HTML : {stats['before']/1024:.0f} Ko -> "
               f"{stats['after']/1024:.0f} Ko ({saved_pct:.0f}% en moins)")
+        if stats["audio_files"]:
+            print(f"Musiques ré-encodées en {AUDIO_BITRATE} : {stats['audio_files']} — "
+                  f"audio : {stats['audio_before']/1048576:.1f} Mo -> "
+                  f"{stats['audio_after']/1048576:.1f} Mo")
         print(f"Paquet de vente créé : {dest_zip}")
         print(f"Taille finale du zip : {dest_zip.stat().st_size/1024/1024:.1f} Mo")
 

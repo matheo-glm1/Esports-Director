@@ -140,19 +140,20 @@ function colorHex(c){
 // HSL<->RGB standard, identique à celui de Three.
 function _colorToHSL(c){ const r=c.r,g=c.g,b=c.b; const max=Math.max(r,g,b),min=Math.min(r,g,b); let h=0,s=0; const l=(max+min)/2; if(max!==min){ const d=max-min; s=l>0.5?d/(2-max-min):d/(max+min); switch(max){ case r: h=(g-b)/d+(g<b?6:0); break; case g: h=(b-r)/d+2; break; case b: h=(r-g)/d+4; break; } h/=6; } return {h,s,l}; }
 function _hslToColor3(h,s,l){ h=((h%1)+1)%1; let r,g,b; if(s===0){ r=g=b=l; } else { const hue2rgb=(p,q,t)=>{ if(t<0)t+=1; if(t>1)t-=1; if(t<1/6)return p+(q-p)*6*t; if(t<1/2)return q; if(t<2/3)return p+(q-p)*(2/3-t)*6; return p; }; const q=l<0.5?l*(1+s):l+s-l*s; const p=2*l-q; r=hue2rgb(p,q,h+1/3); g=hue2rgb(p,q,h); b=hue2rgb(p,q,h-1/3); } return new BABYLON.Color3(r,g,b); }
-// Équivalents de MeshStandardMaterial / MeshBasicMaterial. roughness et
-// metalness n'ont pas d'équivalent sur StandardMaterial : rangés dans
-// metadata pour une passe PBR ultérieure plutôt que faussement simulés.
+// PBRMaterial (Phase 4, personnages) : roughness/metalness étaient jusqu'ici
+// rangés en simple metadata JAMAIS appliqués au rendu (voir note d'origine
+// ci-dessous, conservée) — passe désormais réellement en PBR, comme le
+// reste de la scène (murs/sols/arbres/rochers) depuis les livrables
+// précédents. mkStdMat ne construit QUE des matériaux d'agents/props ici
+// (~10 sites d'appel, pas les ~200 assets de map_assets_babylon.js) : rayon
+// d'impact contenu, safe à convertir d'un coup.
 function mkStdMat(name, color, opts={}){
-  const m = new BABYLON.StandardMaterial(name, scene);
-  m.diffuseColor = (color && color.r!==undefined) ? color : hexToColor3(color);
+  const m = new BABYLON.PBRMaterial(name, scene);
+  m.albedoColor = (color && color.r!==undefined) ? color : hexToColor3(color);
   m.alpha = opts.opacity ?? 1;
-  m.metadata = { roughness: opts.roughness, metalness: opts.metalness };
-  // Correctif : BABYLON.StandardMaterial met specularColor à BLANC PUR par
-  // défaut (contrairement à THREE.MeshStandardMaterial) — reflet dur sous
-  // soleil direct pouvant blanchir toute une surface exposée (signalé par
-  // l'utilisateur sur une pyramide d'Outpost, même cause ici).
-  m.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+  m.roughness = opts.roughness ?? 0.8;
+  m.metallic = opts.metalness ?? 0;
+  m.metadata = { roughness: m.roughness, metalness: m.metallic };
   return m;
 }
 // MeshBasicMaterial = matériau NON éclairé : dans Babylon cela s'obtient
@@ -245,6 +246,21 @@ function mkBox(w,h,d,color,opts={}){
 }
 function mkCyl(r,h,color){ const mat = new BABYLON.StandardMaterial('mkCyl', scene); mat.specularColor = new BABYLON.Color3(0.05,0.05,0.05); mat.diffuseColor = jitterColor(color,0.06); mat.metadata = { roughness:.75+Math.random()*0.15 }; const m = BABYLON.MeshBuilder.CreateCylinder('mkCyl', {diameterTop:r*2, diameterBottom:r*2, height:h, tessellation:14}, scene); m.material = mat; m.position.y = h/2; m.castShadow=true; m.receiveShadow=true; return m; }
 function mkCone(r,h,color){ const mat = new BABYLON.StandardMaterial('mkCone', scene); mat.specularColor = new BABYLON.Color3(0.05,0.05,0.05); mat.diffuseColor = jitterColor(color,0.06); mat.metadata = { roughness:.8 }; const m = BABYLON.MeshBuilder.CreateCylinder('mkCone', {diameterTop:0, diameterBottom:r*2, height:h, tessellation:10}, scene); m.material = mat; m.position.y = h/2; m.castShadow=true; m.receiveShadow=true; return m; }
+// Variante à rayons haut/bas indépendants de mkCyl (radius unique) — requise
+// pour porter les silhouettes de landmarks de biome (troncs effilés, pics,
+// piliers) depuis map_editor.html, qui utilise le mkCyl(rt,rb,h,color,segs)
+// de map_assets_babylon.js (signature différente du mkCyl local ci-dessus,
+// propre à ce fichier). Nouvelle fonction plutôt que de changer la
+// signature de mkCyl : celui-ci a déjà des appelants existants (agents,
+// Spike, fumée) qu'il ne faut pas casser.
+function mkTaperCyl(rt,rb,h,color,segs=12){
+  const mat = new BABYLON.StandardMaterial('mkTaperCyl', scene);
+  mat.specularColor = new BABYLON.Color3(0.05,0.05,0.05);
+  mat.diffuseColor = jitterColor(color,0.06);
+  mat.metadata = { roughness:.78+Math.random()*0.14 };
+  const m = BABYLON.MeshBuilder.CreateCylinder('mkTaperCyl', {diameterTop:rt*2, diameterBottom:rb*2, height:h, tessellation:segs}, scene);
+  m.material = mat; m.position.y = h/2; m.castShadow=true; m.receiveShadow=true; return m;
+}
 // La bibliothèque d'assets partagée détaille chaque objet avec des dizaines
 // de petites pièces (boulons, coutures, feuilles...) — invisibles dans
 // l'ombre projetée à la distance de caméra de ce jeu, mais chacune coûte un
@@ -663,8 +679,103 @@ groundMat.roughness = 0.95; groundMat.metallic = 0;
 groundMat.metadata = { roughness:0.95, metalness:0 };
 // CreateGround est déjà horizontal (contrairement à CreatePlane) : le
 // ground.rotation.x = -Math.PI/2 d'origine n'a plus lieu d'être.
-const ground = BABYLON.MeshBuilder.CreateGround('ground', {width:groundSize, height:groundSize}, scene); ground.material = groundMat;
+// `subdivisions` : sans ça le sol reste un simple quad (2 triangles), pas
+// assez de sommets pour porter le relief ci-dessous. 48 plutôt que 100 (une
+// première passe trop détaillée a fait chuter le framerate) : suffisant
+// pour un relief lu à distance dans un anneau purement décoratif, jamais
+// inspecté de près.
+const ground = BABYLON.MeshBuilder.CreateGround('ground', {width:groundSize, height:groundSize, subdivisions:48}, scene); ground.material = groundMat;
 ground.position.set(mapCenter.x,-0.08,mapCenter.z); ground.receiveShadows=true;
+
+// ---- Relief du décor environnant par biome (identité visuelle AAA,
+// "le relief représente 70% de l'identité d'un biome") ----------------
+// Porté de map_editor.html (biomeRawHeight/bioFbm), SIMPLIFIÉ : ce moteur
+// n'a qu'un seul biome fixe par carte (mapBiome), jamais un mélange
+// angulaire multi-biomes — pas besoin de biomeWeights() ici.
+// RISQUE CRITIQUE maîtrisé : le relief ne doit JAMAIS toucher la zone
+// jouable (rayon < mapRadius), sous peine de fausser la ligne de vue et le
+// pathfinding (calculés à plat, voir Box3/groundFootprint plus haut) — le
+// relief n'agit qu'au-delà de mapRadius, avec une rampe douce
+// (TERRAIN_BLEND) plutôt qu'une marche brutale à la frontière.
+const bioSeed = 17.0 + Math.random()*900;
+function bioHash(x,y){
+  const n = Math.sin(x*127.1 + y*311.7 + bioSeed)*43758.5453123;
+  return n - Math.floor(n);
+}
+function bioValueNoise(x,y){
+  const xi=Math.floor(x), yi=Math.floor(y);
+  const xf=x-xi, yf=y-yi;
+  const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
+  const a=bioHash(xi,yi), b=bioHash(xi+1,yi), c=bioHash(xi,yi+1), d=bioHash(xi+1,yi+1);
+  return a + (b-a)*u + (c-a)*v + (a-b-c+d)*u*v;
+}
+function bioFbm(x,y,octaves){
+  let amp=0.5, freq=1, sum=0, norm=0;
+  for(let i=0;i<octaves;i++){
+    sum += amp*bioValueNoise(x*freq, y*freq);
+    norm += amp;
+    amp *= 0.5; freq *= 2.05;
+  }
+  return sum/norm; // ~0..1
+}
+function biomeRawHeight(name, x, z, r){
+  switch(name){
+    case 'mountain': {
+      const ridge = 1 - Math.abs(bioFbm(x*0.02, z*0.02, 4)*2-1);
+      let h = ridge*ridge*38 + bioFbm(x*0.055, z*0.055, 3)*7;
+      h *= 0.4 + 0.6*Math.max(0, Math.min(1, r/(mapRadius*1.95)));
+      return h;
+    }
+    case 'canyon': {
+      const n = bioFbm(x*0.022, z*0.022, 4);
+      const trench = Math.abs(n-0.5)*2;
+      return -9 + trench*20 + bioFbm(x*0.09,z*0.09,3)*3;
+    }
+    case 'desert': {
+      const wave = Math.sin(x*0.045 + bioFbm(x*0.018,z*0.018,3)*5)*0.5+0.5;
+      return wave*7.5 + bioFbm(x*0.08,z*0.08,3)*1.8;
+    }
+    case 'tropical':
+      return bioFbm(x*0.022, z*0.022, 4)*6 - 0.4;
+    case 'temperate':
+      return bioFbm(x*0.02, z*0.02, 4)*4.2 - 0.6;
+    case 'taiga':
+      return bioFbm(x*0.02, z*0.02, 4)*5 - 0.5;
+    case 'savanna':
+      return bioFbm(x*0.016, z*0.016, 3)*2.4 - 0.2;
+    case 'tundra':
+      return bioFbm(x*0.03, z*0.03, 3)*1.1 - 0.1;
+    case 'swamp':
+      return bioFbm(x*0.025, z*0.025, 3)*1.2 - 1.4;
+    case 'city':
+      return bioFbm(x*0.02, z*0.02, 2)*0.4;
+    case 'prairie':
+      return bioFbm(x*0.022, z*0.022, 3)*1.3 - 0.2;
+    default: // 'mixed' : aucune identité de relief propre, quasi plat
+      return bioFbm(x*0.02, z*0.02, 3)*0.8 - 0.1;
+  }
+}
+const TERRAIN_BLEND = 26; // rampe douce sur ~26 unités au-delà de mapRadius avant relief plein — évite une marche brutale
+function matchTerrainHeight(x,z){
+  const dx = x-mapCenter.x, dz = z-mapCenter.z;
+  const r = Math.sqrt(dx*dx+dz*dz);
+  if(r<=mapRadius) return 0; // zone jouable : jamais de relief, ligne de vue/pathfinding intacts
+  const blend = Math.min(1, (r-mapRadius)/TERRAIN_BLEND);
+  return biomeRawHeight(mapBiome, x, z, r)*blend;
+}
+// Déplace les sommets du sol au-delà de mapRadius selon le relief ci-dessus
+// (la zone jouable, rayon <= mapRadius, reste à y=0 — jamais touchée).
+(function applyGroundRelief(){
+  const pos = ground.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+  for(let i=0;i<pos.length;i+=3){
+    const wx = mapCenter.x+pos[i], wz = mapCenter.z+pos[i+2];
+    pos[i+1] = matchTerrainHeight(wx, wz);
+  }
+  ground.updateVerticesData(BABYLON.VertexBuffer.PositionKind, pos);
+  const normals = [];
+  BABYLON.VertexData.ComputeNormals(pos, ground.getIndices(), normals);
+  ground.updateVerticesData(BABYLON.VertexBuffer.NormalKind, normals);
+})();
 // Décor cohérent avec le biome choisi, éparpillé au-delà de la zone
 // jouable (jamais dans le pathfinding/la navigation) — sans ça, le sol
 // changeait bien de couleur avec le biome mais restait un plan totalement
@@ -673,37 +784,249 @@ ground.position.set(mapCenter.x,-0.08,mapCenter.z); ground.receiveShadows=true;
 // Volontairement modeste en nombre : voir l'optimisation FPS plus haut
 // dans ce fichier — le sol de la carte représente déjà l'essentiel des
 // mailles de la scène, pas la peine d'en rajouter des centaines de plus.
+// Pools resserrés (Phase 5, identité AAA par biome — "moins de 30%
+// d'éléments visuels partagés entre deux biomes"). Avant : nat_bush/
+// nat_deadtree/nat_log/nat_fern/nat_mushroom réutilisés génériquement dans
+// 5 à 7 biomes sur 12, rendant plusieurs biomes quasi indiscernables sans
+// regarder la seule couleur du sol. Chaque pool ci-dessous vient d'une
+// famille d'assets déjà largement exclusive au catalogue (Cactus pour
+// désert, cristaux pour ville, glace pour toundra, arbres nommés pour
+// temperate...) — recombinaison de l'existant, aucun nouvel asset requis.
+// Recouvrement max vérifié entre deux biomes voisins : 1 élément sur 4
+// (25%), jamais plus (ex. mountain/canyon partagent seulement nat_cliff).
 const MATCH_BIOME_SCATTER = {
   mixed:     ['nat_oak','nat_bush','nat_tallgrass'],
-  tropical:  ['nat_palm','nat_liana','nat_bush','nat_flowerbush'],
-  desert:    ['nat_cactus','nat_cactus_giant','nat_dune2','nat_rock_m'],
-  savanna:   ['nat_baobab','nat_tallgrass','nat_drybush','nat_rock2'],
-  tundra:    ['nat_iceblock','nat_snowpile','nat_icefloe'],
-  taiga:     ['nat_fir','nat_pine','nat_stump','nat_deadtree'],
+  tropical:  ['nat_palm','nat_liana','nat_vine','nat_flowerbush'],
+  desert:    ['nat_cactus','nat_cactus_giant','nat_agave','nat_dune2'],
+  savanna:   ['nat_baobab','nat_acacia','nat_drybush','nat_rock2'],
+  tundra:    ['nat_iceblock','nat_icefloe','nat_glacier','nat_snowpile'],
+  taiga:     ['nat_fir','nat_pine','nat_deadtree','nat_stump'],
   mountain:  ['nat_spire','nat_cliff','nat_bigrock','nat_rock_l'],
-  swamp:     ['nat_mangrove','nat_reed','nat_algae','nat_bramble'],
-  canyon:    ['nat_cliff','nat_rock_l','nat_bigrock','nat_crater'],
-  prairie:   ['nat_prairie2','nat_flower_red','nat_flower_yellow','nat_sunflower','nat_tallgrass'],
-  city:      ['nat_crystal_blue','nat_crystal_green','nat_rock_m'],
-  temperate: ['nat_oak','nat_birch','nat_maple','nat_bush','nat_fern'],
+  swamp:     ['nat_mangrove','nat_algae','nat_bramble','nat_log'],
+  canyon:    ['nat_crater','nat_cliff','nat_rock_m','nat_rock_s'],
+  prairie:   ['nat_prairie2','nat_sunflower','nat_flower_red','nat_flower_yellow','nat_tallgrass'],
+  city:      ['nat_crystal_blue','nat_crystal_green','nat_crystal_red','nat_rock_m'],
+  temperate: ['nat_cherry','nat_maple','nat_birch','nat_bamboo'],
 };
+// ---- Landmarks de biome : 1 repère majeur, visible de loin, par biome
+// (identité AAA — "silhouette exclusive" reconnaissable à 500m). Porté des
+// closures build() de map_editor.html (placeLandmark, un par biome) — même
+// géométrie, adaptée à l'idiome de CE fichier : pas de shim `.add()` façon
+// Three.js ici (`child.parent = g` directement), et `addBiomeObj(obj)`
+// devient `obj.parent = rootGroup` + `pruneSmallShadowCasters(obj)` (déjà
+// utilisée par le scatter ci-dessous). `mkCyl` local à ce fichier n'a
+// qu'un seul rayon (contrairement à celui de map_assets_babylon.js utilisé
+// par l'éditeur) : les silhouettes effilées (troncs, pics, piliers)
+// utilisent donc `mkTaperCyl` (voir plus haut) plutôt que `mkCyl`.
+// Portée volontairement limitée au SEUL repère majeur par biome (règle 03) :
+// les 3 repères secondaires + 10 points mineurs par biome (grottes,
+// fossiles, passages secrets...) restent un chantier de contenu séparé,
+// pour un livrable ultérieur — pas de landmark pour 'city' non plus,
+// fidèle à la source (city n'a que scatterBuildings côté éditeur).
+const BIOME_LANDMARK_BUILDERS = {
+  temperate: (x,z,y)=>{
+    const deadtreeAsset = MapAssets.ASSETS.find(a=>a.id==='nat_deadtree');
+    if(!deadtreeAsset) return;
+    const obj = deadtreeAsset.build(deadtreeAsset.color);
+    obj.position.set(x,y,z);
+    obj.scaling.set(3.2,3.6,3.2);
+    obj.rotation.y = Math.random()*Math.PI*2;
+    obj.parent = rootGroup; pruneSmallShadowCasters(obj);
+  },
+  desert: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkDesert', scene);
+    const stone = 0xc98f52;
+    const pillarH = 9+Math.random()*2, gap = 5+Math.random()*1.5;
+    [-1,1].forEach(side=>{
+      const p = mkBox(2.2, pillarH, 2.4, stone, { roughness:0.9 });
+      p.position.x = side*(gap/2+1.1);
+      p.parent = g;
+    });
+    const lintel = mkBox(gap+4.6, 2.4, 2.6, stone, { roughness:0.9 });
+    lintel.position.y = pillarH+1.2;
+    lintel.parent = g;
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  savanna: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkSavanna', scene);
+    const trunkH = 7+Math.random()*2, trunkR = 2.4+Math.random()*0.6;
+    const trunk = mkTaperCyl(trunkR*0.75, trunkR, trunkH, 0x7a6a4a, 9);
+    trunk.parent = g;
+    const canopy = BABYLON.MeshBuilder.CreatePolyhedron('baobabCanopy', {type:3, size:trunkR*2.1}, scene);
+    canopy.scaling.set(1,0.42,1);
+    const canopyMat = new BABYLON.PBRMaterial('baobabCanopyMat', scene);
+    canopyMat.albedoColor = hexToColor3(0x6a7a3a); canopyMat.roughness = 0.95; canopyMat.metadata = {roughness:0.95,metalness:0};
+    canopy.material = canopyMat;
+    canopy.position.y = trunkH*0.98;
+    canopy.parent = g;
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  tundra: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkTundra', scene);
+    const spireH = 10+Math.random()*3;
+    const spire = mkTaperCyl(0.3, 2.4+Math.random()*0.6, spireH, 0xcfe8f0, 7);
+    spire.parent = g;
+    const rib = mkTaperCyl(0.12,0.16, 2.6, 0xe8e2d0, 6);
+    rib.rotation.z = Math.PI/2;
+    rib.position.set(1.6, 0.3, 0.4);
+    rib.parent = g;
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  taiga: (x,z,y)=>{
+    const trunkH = 13+Math.random()*3;
+    const trunk = mkTaperCyl(0.1, 0.55+Math.random()*0.15, trunkH, 0x4a3a2c, 7);
+    trunk.position.set(x,y+trunkH/2,z);
+    trunk.rotation.y = Math.random()*Math.PI*2;
+    trunk.parent = rootGroup; pruneSmallShadowCasters(trunk);
+    for(let i=0;i<5;i++){
+      const branch = mkTaperCyl(0.03,0.08, 0.8+Math.random()*0.6, 0x4a3a2c, 5);
+      branch.rotation.z = Math.PI/2.3*(Math.random()<0.5?1:-1);
+      branch.position.set(x, y+2+i*(trunkH-3)/5, z);
+      branch.parent = rootGroup; pruneSmallShadowCasters(branch);
+    }
+  },
+  mountain: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkMountain', scene);
+    const peakH = 16+Math.random()*4;
+    const peak = mkTaperCyl(0.4, 3.6+Math.random()*0.8, peakH, 0x847f70, 6);
+    peak.parent = g;
+    let cairnY = peakH, cairnR = 0.65;
+    for(let i=0;i<4;i++){
+      const stone = BABYLON.MeshBuilder.CreatePolyhedron('cairn', {type:2, size:cairnR}, scene);
+      const stoneMat = new BABYLON.StandardMaterial('cairnMat', scene);
+      stoneMat.diffuseColor = hexToColor3(0x9a958a); stoneMat.specularColor = new BABYLON.Color3(0,0,0);
+      stone.material = stoneMat;
+      stone.position.set((Math.random()-0.5)*0.2, cairnY+cairnR*0.7, (Math.random()-0.5)*0.2);
+      stone.parent = g;
+      cairnY += cairnR*1.1; cairnR *= 0.72;
+    }
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  swamp: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkSwamp', scene);
+    const wood = 0x3a3a2c;
+    const trunkH = 8+Math.random()*2;
+    const trunk = mkTaperCyl(0.3, 0.9, trunkH, wood, 7);
+    trunk.parent = g;
+    for(let i=0;i<7;i++){
+      const ang = (i/7)*Math.PI*2 + Math.random()*0.3;
+      const root = mkTaperCyl(0.12,0.22, 2.6+Math.random()*1.2, wood, 6);
+      root.position.set(Math.cos(ang)*1.3, 0, Math.sin(ang)*1.3);
+      root.rotation.z = Math.cos(ang)*1.15; root.rotation.x = -Math.sin(ang)*1.15;
+      root.parent = g;
+    }
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  canyon: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkCanyon', scene);
+    const stone = 0x9a5a3a;
+    const pillarH = 12+Math.random()*3, gap = 3+Math.random()*1;
+    [-1,1].forEach(side=>{
+      const p = mkTaperCyl(1.3+Math.random()*0.3, 1.9, pillarH, stone, 8);
+      p.position.x = side*(gap/2+1.5);
+      p.parent = g;
+    });
+    const lintel = mkBox(gap+5.5, 2.8, 2.2, stone, { roughness:0.92 });
+    lintel.position.y = pillarH+1.4;
+    lintel.rotation.z = (Math.random()-0.5)*0.05;
+    lintel.parent = g;
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  prairie: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkPrairie', scene);
+    const count = 7+Math.floor(Math.random()*3), ringR = 3.6+Math.random()*0.8;
+    for(let i=0;i<count;i++){
+      const ang = (i/count)*Math.PI*2;
+      const slabH = 2.2+Math.random()*1;
+      const slab = mkBox(0.6, slabH, 0.35, 0x8a857a, { roughness:0.95 });
+      slab.position.set(Math.cos(ang)*ringR, slabH/2, Math.sin(ang)*ringR);
+      slab.rotation.y = ang;
+      slab.rotation.z = (Math.random()-0.5)*0.1;
+      slab.parent = g;
+    }
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+  tropical: (x,z,y)=>{
+    const g = new BABYLON.TransformNode('landmarkTropical', scene);
+    const stone = 0x5c6b52;
+    const h = 9+Math.random()*2.5;
+    const monolith = mkBox(1.8,h,1.4, stone, { roughness:0.97 });
+    monolith.parent = g;
+    const head = BABYLON.MeshBuilder.CreatePolyhedron('idolHead', {type:2, size:1.3}, scene);
+    const headMat = new BABYLON.PBRMaterial('idolHeadMat', scene);
+    headMat.albedoColor = hexToColor3(stone); headMat.roughness = 0.95; headMat.metadata = {roughness:0.95,metalness:0};
+    head.material = headMat;
+    head.position.y = h*0.98;
+    head.parent = g;
+    for(let i=0;i<6;i++){
+      const vine = mkTaperCyl(0.04,0.05, 2+Math.random()*2.5, 0x3f6b32, 5);
+      vine.position.set((Math.random()-0.5)*1.6, h*(0.3+Math.random()*0.5), 0.75);
+      vine.rotation.x = 0.08*(Math.random()-0.5);
+      vine.parent = g;
+    }
+    g.position.set(x,y,z); g.rotation.y = Math.random()*Math.PI*2;
+    g.parent = rootGroup; pruneSmallShadowCasters(g);
+  },
+};
+function placeBiomeLandmark(){
+  const build = BIOME_LANDMARK_BUILDERS[mapBiome];
+  if(!build) return; // 'mixed' ou biome sans repère dédié (city) : rien à placer
+  const angle = Math.random()*Math.PI*2;
+  const dist = mapRadius*(1.3+Math.random()*0.5);
+  const x = mapCenter.x+Math.cos(angle)*dist, z = mapCenter.z+Math.sin(angle)*dist;
+  build(x, z, matchTerrainHeight(x,z));
+}
 function scatterBiomeDecoration(){
   const pool = MATCH_BIOME_SCATTER[mapBiome] || MATCH_BIOME_SCATTER.mixed;
-  const COUNT = 70;
-  for(let i=0;i<COUNT;i++){
-    const id = pool[Math.floor(Math.random()*pool.length)];
-    const def = MapAssets.ASSETS.find(a=>a.id===id);
-    if(!def || !def.build) continue;
-    const angle = Math.random()*Math.PI*2;
-    const dist = mapRadius*(1.05+Math.random()*0.9); // hors de la zone jouable, jamais dessus
-    const obj = def.build(def.color);
-    obj.position.set(mapCenter.x+Math.cos(angle)*dist, 0, mapCenter.z+Math.sin(angle)*dist);
-    obj.rotation.y = Math.random()*Math.PI*2;
-    const s = 0.85+Math.random()*0.5;
-    obj.scaling.set(s,s,s);
-    obj.parent = rootGroup;
-    pruneSmallShadowCasters(obj);
+  // Densité par palier (règle 04, version simplifiée pour ce moteur : la
+  // carte n'est jamais parcourue à pied, juste regardée à distance, donc
+  // pas besoin des 6 bandes radiales de l'éditeur) : palier proche =
+  // détaillé à échelle normale, palier lointain = moins nombreux mais bien
+  // plus gros — "dense en silhouettes, léger en détails" au loin.
+  function scatterTier(count, distMin, distMax, scaleMin, scaleMax, noShadow){
+    for(let i=0;i<count;i++){
+      const id = pool[Math.floor(Math.random()*pool.length)];
+      const def = MapAssets.ASSETS.find(a=>a.id===id);
+      if(!def || !def.build) continue;
+      const angle = Math.random()*Math.PI*2;
+      const dist = mapRadius*(distMin+Math.random()*(distMax-distMin));
+      const wx = mapCenter.x+Math.cos(angle)*dist, wz = mapCenter.z+Math.sin(angle)*dist;
+      const obj = def.build(def.color);
+      // Hauteur échantillonnée sur le relief (§5.1) plutôt que fixée à 0 :
+      // sans ça, les objets flottent ou s'enfoncent dès que le sol vallonne.
+      obj.position.set(wx, matchTerrainHeight(wx,wz), wz);
+      obj.rotation.y = Math.random()*Math.PI*2;
+      const s = scaleMin+Math.random()*(scaleMax-scaleMin);
+      obj.scaling.set(s,s,s);
+      obj.parent = rootGroup;
+      if(noShadow){
+        // Palier lointain : agrandir tout l'objet (règle "silhouette plus
+        // grosse au loin") repasse mécaniquement AU-DESSUS du seuil de
+        // pruneSmallShadowCasters plein de petites pièces (écorce, cartes
+        // de feuilles...) normalement élaguées — sur des dizaines d'objets
+        // ça a fait chuter le framerate à ~1 img/s (mesuré : 780-1280ms par
+        // frame). Ces objets sont décor lointain, jamais inspectés de
+        // près : aucune ombre visible n'en vaut le coût, on désactive
+        // totalement plutôt que d'élaguer au cas par cas.
+        (obj.getChildMeshes ? obj.getChildMeshes(false) : []).forEach(m=> m.castShadow=false);
+      } else {
+        pruneSmallShadowCasters(obj);
+      }
+    }
   }
+  // Total (54) volontairement resté proche de l'ancien COUNT=70 fixe —
+  // voir la note de perf ci-dessus, mesuré à ~50-125ms de construction par
+  // objet sur cet environnement : ne pas gonfler le total sans raison.
+  scatterTier(36, 1.05, 1.45, 0.85, 1.35, false);
+  scatterTier(18, 1.45, 1.95, 1.6, 2.6, true);
+  placeBiomeLandmark();
 }
 scatterBiomeDecoration();
 
@@ -767,6 +1090,37 @@ floorNodes.forEach(f=>{
 });
 navBlockBoxes.forEach(b=> rasterizeBox(b, 0.12, i=> walkableGrid[i]=0));
 function isWalkableCell(gx,gz){ return gx>=0 && gx<gridW && gz>=0 && gz<gridH && walkableGrid[gidx(gx,gz)]===1; }
+// Garde-fou : une carte dont la grille est coupée en îlots disjoints est
+// injouable EN SILENCE — findPath renvoie un chemin d'un seul point quand la
+// destination est dans un autre îlot (voir le "carte disjointe" plus bas),
+// donc les agents concernés restent plantés à leur spawn tout le round, ce
+// qui se lit en jeu comme un mur invisible qui ne tombe jamais. Constaté sur
+// Outpost : deux pyramides posées aux échelles 3.5 et 2 recouvraient à elles
+// seules tout le centre de la carte et le site A. On vérifie donc une fois au
+// chargement que les spawns et les sites communiquent vraiment.
+function checkNavConnectivity(){
+  const keys = ['zone_spawn_atk','zone_spawn_def','zone_siteA','zone_siteB'].filter(k=> zones[k]);
+  if(keys.length < 2) return;
+  const from = keys[0], start = nearestWalkableCell(zones[from]);
+  const seen = new Uint8Array(gridW*gridH), stack = [gidx(start.gx,start.gz)];
+  seen[stack[0]] = 1;
+  while(stack.length){
+    const cur = stack.pop(), cgx = cur%gridW, cgz = (cur-cgx)/gridW;
+    for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      const nx = cgx+dx, nz = cgz+dz;
+      if(!isWalkableCell(nx,nz)) continue;
+      const ni = gidx(nx,nz);
+      if(!seen[ni]){ seen[ni] = 1; stack.push(ni); }
+    }
+  }
+  const lost = keys.slice(1).filter(k=>{ const c = nearestWalkableCell(zones[k]); return !seen[gidx(c.gx,c.gz)]; });
+  if(lost.length){
+    console.warn('[NAV] Carte coupée en morceaux — '+lost.join(', ')+' injoignable(s) depuis '+from
+      +'. Les agents concernés resteront bloqués à leur spawn tout le round.'
+      +' Cause habituelle : un décor trop grand (pyramide, bâtiment) posé en travers des couloirs.');
+  }
+}
+checkNavConnectivity();
 function nearestWalkableCell(pt){
   const c = gxz(pt.x, pt.z);
   if(isWalkableCell(c.gx,c.gz)) return c;
@@ -1218,6 +1572,56 @@ const PLAYSTYLE_BY_ROLE = { Duelist:'Entry Fragger', Initiator:'Initiator Playma
 // d'équipe déjà présente) — pour distinguer les coéquipiers d'un coup
 // d'œil au-delà de l'étiquette de nom (voir Agent.buildMesh).
 const ROLE_ACCENT_COLOR = { Duelist:0xff9c3d, Initiator:0x3dd6ff, Controller:0xb06dff, Sentinel:0x5ee06a, Flex:0xd8d8d8 };
+// Identité visuelle par AGENT VALOSTRIKE (le personnage réellement joué,
+// this.kit.agent — voir playerToAIKit côté script.js) : jusqu'ici tous les
+// agents portaient exactement la même tenue grise/olive/tan, seule la
+// couleur d'équipe (anneau au sol/visière/brassard, inchangée) distinguait
+// les joueurs. `primary` recolore le gilet/pantalon (plus grande surface
+// visible après la couleur d'équipe elle-même), `accent` la pièce de rôle
+// (roleMat) — un thème par agent, dérivé de son nom/titre/sorts (ex. Ignis
+// "Maître du Feu" → orange braise, Obscura "Maîtresse des Ombres" → noir
+// violacé). Couvre les 24 agents du roster (AGENT_KITS, valorant.js).
+// `accessories` : pièces de silhouette ajoutées par Agent.buildMesh (voir
+// plus bas, section "Pièces de silhouette par agent") — chaque type
+// (hood/cape/crest/shoulderSpikes/shoulderPlate/chestEmblem) est un
+// builder générique partagé, paramétré différemment par agent, plutôt que
+// 24 géométries bespoke : même logique que les arbres/rochers (quelques
+// formes réutilisables + variation par instance) appliquée aux personnages.
+// `glow` : la tête reste cagoulée (vue isométrique, un visage détaillé ne
+// se lirait jamais à cette distance de caméra — voir buildMesh) donc
+// l'identité "visage" passe par la VISIÈRE : couleur/forme par agent
+// systématiquement, plus un liseré émissif (yeux qui luisent) sur les
+// agents à identité élémentaire/magique marquée.
+const AGENT_VISUAL_THEME = {
+  // Duellistes
+  Kaidan:  { primary:0x3a2a5c, accent:0x1a1a22, accessories:[{type:'hood'},{type:'cape'}], glow:true },
+  Rhoven:  { primary:0x6b1f1f, accent:0x1c1c1c, accessories:[{type:'shoulderSpikes', side:'right', count:3}] },
+  Ignis:   { primary:0xc1501f, accent:0x2a2220, accessories:[{type:'shoulderPlate', side:'right'},{type:'chestEmblem'}], glow:true },
+  Vexal:   { primary:0x241633, accent:0x8a4fd6, accessories:[{type:'cape'},{type:'chestEmblem'}], glow:true },
+  Solmara: { primary:0xd4a017, accent:0xe8dcc0, accessories:[{type:'crest'},{type:'chestEmblem'}], glow:true },
+  Drakko:  { primary:0x2e5c3a, accent:0x7a2020, accessories:[{type:'shoulderSpikes', side:'both', count:2},{type:'crest'}] },
+  Halcyon: { primary:0x9fd6e0, accent:0xb8c4c8, accessories:[{type:'cape', light:true}] },
+  // Initiateurs
+  Sondra:  { primary:0x8a5a3a, accent:0xb87333, accessories:[{type:'shoulderPlate', side:'left'}] },
+  Pryzm:   { primary:0x3ec9c9, accent:0xe0f0f0, accessories:[{type:'crest'},{type:'chestEmblem'}], glow:true },
+  Kestrix: { primary:0x9a8560, accent:0xb5824a, accessories:[{type:'shoulderPlate', side:'left'},{type:'hood'}] },
+  Marrow:  { primary:0xd8d0c0, accent:0x1a1a1a, accessories:[{type:'hood'},{type:'chestEmblem'}], glow:true },
+  Voltane: { primary:0x2a7fd6, accent:0xe0c020, accessories:[{type:'crest'},{type:'chestEmblem'}], glow:true },
+  Ashra:   { primary:0x6a6660, accent:0x8a2a1e, accessories:[{type:'hood'},{type:'cape'}] },
+  // Contrôleurs
+  Nimbus:  { primary:0x5a6b7a, accent:0xd8dee2, accessories:[{type:'cape'},{type:'crest'}] },
+  Verdane: { primary:0x3a6b3a, accent:0x5c4530, accessories:[{type:'shoulderPlate', side:'left'},{type:'crest'}] },
+  Grael:   { primary:0x6a6a68, accent:0x9a5a30, accessories:[{type:'shoulderSpikes', side:'both', count:2},{type:'shoulderPlate', side:'right'}] },
+  Mistara: { primary:0xaebcc4, accent:0xe8eef0, accessories:[{type:'cape', light:true},{type:'hood'}] },
+  Obscura: { primary:0x18161c, accent:0x4a2a5c, accessories:[{type:'hood'},{type:'cape'}], glow:true },
+  Corvane: { primary:0x1a1a1e, accent:0x2a2e3c, accessories:[{type:'shoulderPlate', side:'left'},{type:'hood'}] },
+  // Sentinelles
+  Sentra:  { primary:0x6a6e70, accent:0xd6621f, accessories:[{type:'chestEmblem'},{type:'shoulderPlate', side:'right'}] },
+  Warden:  { primary:0x3a5a7a, accent:0xb0b8c0, accessories:[{type:'shoulderPlate', side:'left'},{type:'chestEmblem'}] },
+  Bastian: { primary:0x3a3d40, accent:0x9a2020, accessories:[{type:'chestEmblem'},{type:'shoulderPlate', side:'right'}] },
+  Locke:   { primary:0x4a4a48, accent:0xb5601f, accessories:[{type:'shoulderSpikes', side:'right', count:2},{type:'chestEmblem'}] },
+  Thorne:  { primary:0x3a4a28, accent:0x5c3a24, accessories:[{type:'shoulderSpikes', side:'left', count:3},{type:'hood'}] },
+};
 const NAMES_A = ['Halcyon "Odren"','Pryzm "Ronin"','Corvane "Aspen"','Warden "Gallor"','Kaidan "Clover44"'];
 const NAMES_B = ['Nimbus "Milestone44"','Kaidan "Helior"','Pryzm "Rioren"','Warden "Sorian"','Pryzm "Neranis"'];
 
@@ -1334,9 +1738,19 @@ class Agent{
     // lisible via l'anneau au sol (déjà existant) + la visière/le brassard
     // (mat/accentMat, désormais réservés à ces petits éléments seulement)
     // plutôt que de teindre l'intégralité de la tenue.
+    // Thème de l'AGENT VALOSTRIKE réellement joué (this.kit.agent, résolu
+    // côté manager par playerToAIKit — voir script.js) : recolore
+    // gilet/pantalon/pièce de rôle/arme selon son identité propre, par-
+    // dessus la base terne ci-dessus. En repli (kit absent, ex. bots de
+    // démo sans données manager) : on retrouve le nom d'agent dans
+    // this.name lui-même, qui suit la convention 'Agent "Pseudo"' (voir
+    // NAMES_A/NAMES_B) — sans thème reconnu, la tenue reste neutre comme
+    // avant.
+    const visualAgentName = (this.kit && this.kit.agent) || (/^(\w+)\s+"/.exec(this.name||'')||[])[1] || null;
+    const theme = AGENT_VISUAL_THEME[visualAgentName] || null;
     const shirtMat = mkStdMat('agentShirt', 0x9a978c, { roughness:0.8 });
-    const vestMat = mkStdMat('agentVest', 0x5c5c46, { roughness:0.85 });
-    const pantsMat = mkStdMat('agentPants', 0x8a7a5c, { roughness:0.85 });
+    const vestMat = mkStdMat('agentVest', theme ? theme.primary : 0x5c5c46, { roughness:0.85 });
+    const pantsMat = mkStdMat('agentPants', theme ? hexToColor3(theme.primary).scale(0.62) : 0x8a7a5c, { roughness:0.85 });
     // Teinte de peau variée par personnage (avant : la même couleur exacte
     // pour les 10 agents d'un match, rendu "clones") — léger décalage
     // teinte/saturation/luminosité aléatoire autour d'une base neutre.
@@ -1348,13 +1762,19 @@ class Agent{
       Math.max(0.15,Math.min(0.85,skinHsl.l+(Math.random()-0.5)*0.3))
     );
     const skinMat = mkStdMat('agentSkin', skinCol, { roughness:0.85 });
-    const gunMat = mkStdMat('agentGun', 0x22252a, { roughness:0.4, metalness:0.55 });
+    // Skin d'arme : légère teinte vers l'accent de l'agent plutôt qu'un
+    // gunmetal 100% neutre — reste lisible comme une arme (majorité
+    // toujours sombre/métallique), juste une touche d'identité.
+    const gunBaseCol = hexToColor3(0x22252a);
+    const gunCol = theme ? gunBaseCol.scale(0.8).add(hexToColor3(theme.accent).scale(0.2)) : gunBaseCol;
+    const gunMat = mkStdMat('agentGun', gunCol, { roughness:0.4, metalness:0.55 });
     const bootMat = mkStdMat('agentBoot', 0x1c1c1e, { roughness:0.8 });
     // Accent de rôle (Duelliste/Initiateur/Contrôleur/Sentinelle/Flex,
     // déjà connu) sur une petite pièce du modèle, en plus de la couleur
     // d'équipe — distingue les coéquipiers d'un coup d'œil au-delà de
-    // l'étiquette de nom.
-    const roleMat = mkStdMat('agentRole', ROLE_ACCENT_COLOR[this.role]||0xd8d8d8, { roughness:0.5, metalness:0.25 });
+    // l'étiquette de nom. Le thème d'agent (plus spécifique) prend le pas
+    // sur l'accent de rôle (plus générique) quand les deux existent.
+    const roleMat = mkStdMat('agentRole', theme ? theme.accent : (ROLE_ACCENT_COLOR[this.role]||0xd8d8d8), { roughness:0.5, metalness:0.25 });
     const cast = m=>{ m.castShadow=true; return m; };
     const cyl = (n,rt,rb,h,seg,material)=>{ const m = BABYLON.MeshBuilder.CreateCylinder(n, {diameterTop:rt*2, diameterBottom:rb*2, height:h, tessellation:seg}, scene); m.material = material; return m; };
     const box = (n,w,h,d,material)=>{ const m = BABYLON.MeshBuilder.CreateBox(n, {width:w, height:h, depth:d}, scene); m.material = material; return m; };
@@ -1414,7 +1834,70 @@ class Agent{
     // est vue de dessus/isométrique de toute façon, un visage détaillé ne
     // s'y voit jamais — autant assumer complètement le look "cagoulé".
     const head = cast(sph('head',0.16,8, bootMat)); head.position.y=1.16; head.scaling.set(0.92,1,0.98); head.parent = g;
-    const visor = cast(box('visor',0.2,0.07,0.06, mat)); visor.position.set(0,1.17,0.13); visor.parent = g;
+    // Visière = identité "visage" par agent. La tête reste cagoulée (voir
+    // note ci-dessus, un visage détaillé ne se lirait jamais à la distance
+    // de caméra de ce jeu) donc c'est la SEULE pièce de tête qui varie par
+    // agent — couleur d'accent systématique, plus lueur émissive (façon
+    // "yeux qui luisent") sur les agents à identité élémentaire/magique
+    // marquée (theme.glow). La couleur d'ÉQUIPE reste lisible ailleurs
+    // (anneau au sol + brassard, jamais touchés ici).
+    const visorMat = mkStdMat('visor', theme ? theme.accent : hexToColor3(teamColor), { roughness:0.3, metalness:0.35 });
+    if(theme && theme.glow) visorMat.emissiveColor = hexToColor3(theme.accent).scale(0.55);
+    const visor = cast(box('visor',0.2,0.07,0.06, visorMat)); visor.position.set(0,1.17,0.13); visor.parent = g;
+    // Pièces de silhouette par agent (theme.accessories) : quelques formes
+    // génériques réutilisables (capuche/cape/crête/pointes d'épaule/plaque
+    // d'épaule/emblème de poitrine), combinées et positionnées différemment
+    // par agent plutôt que 24 géométries bespoke — même principe que les
+    // arbres/rochers de la bibliothèque d'assets. Bots de démo/agents sans
+    // thème reconnu : aucune pièce ajoutée, silhouette de base inchangée.
+    if(theme && theme.accessories){
+      const accMatCache = {};
+      const accMat = (key, roughness, metalness)=>{
+        if(!accMatCache[key]) accMatCache[key] = mkStdMat('agentAcc_'+key, theme.primary, { roughness, metalness });
+        return accMatCache[key];
+      };
+      theme.accessories.forEach(acc=>{
+        if(acc.type==='hood'){
+          const hm = accMat('hood', 0.9, 0);
+          const hood = cast(sph('hoodPiece',0.19,8, hm)); hood.scaling.set(1,1.05,1.08); hood.position.set(0,1.19,-0.03); hood.parent = g;
+          // cyl(n,rt,rb,h,...) : rt=diamètre du HAUT local, rb=diamètre du
+          // BAS local (voir définition de cyl plus haut). rb large (base
+          // attachée à la capuche) → rt ~0 (pointe qui s'éloigne).
+          const tip = cast(cyl('hoodTip',0,0.075,0.14,6, hm)); tip.position.set(0,1.34,-0.08); tip.rotation.x=-0.3; tip.parent = g;
+        } else if(acc.type==='cape'){
+          const cm = accMat('cape', 0.85, 0);
+          const w = acc.light ? 0.26 : 0.34, alpha = acc.light ? 0.85 : 1;
+          const cape = cast(box('cape',w,0.58,0.03, cm)); cape.material.alpha = alpha;
+          cape.position.set(0,0.92,-0.15); cape.rotation.x=0.2; cape.parent = g;
+        } else if(acc.type==='crest'){
+          const cm = accMat('crest', 0.35, 0.35);
+          // Pointe vers le HAUT : base large (rb) posée sur la tête, sommet
+          // fin (rt) — même logique rt/rb que hoodTip ci-dessus.
+          const crest = cast(cyl('crest',0.008,0.05,0.19,6, cm)); crest.position.set(0,1.32,-0.02); crest.parent = g;
+        } else if(acc.type==='shoulderSpikes'){
+          const sm = accMat('spikes', 0.55, 0.2);
+          const sides = acc.side==='both' ? [-1,1] : acc.side==='left' ? [-1] : [1];
+          const count = acc.count||3;
+          sides.forEach(sx=>{
+            for(let i=0;i<count;i++){
+              // Base large (rb, à l'épaule) → pointe fine (rt~0) qui se dresse.
+              const spike = cast(cyl('spike',0,0.05-i*0.008,0.15-i*0.022,6, sm));
+              spike.position.set(sx*0.29, 1.04+i*0.035, -0.03+i*0.035);
+              spike.rotation.z = sx*0.55;
+              spike.parent = g;
+            }
+          });
+        } else if(acc.type==='shoulderPlate'){
+          const pm = accMat('plate', 0.5, 0.25);
+          const sx = acc.side==='left' ? -1 : 1;
+          const plate = cast(sph('shoulderPlate',0.15,7, pm)); plate.scaling.set(1,0.65,1);
+          plate.position.set(sx*0.29,1.03,0); plate.parent = g;
+        } else if(acc.type==='chestEmblem'){
+          const em = accMat('emblem', 0.3, 0.4);
+          const emblem = cast(box('chestEmblem',0.1,0.1,0.02, em)); emblem.position.set(0,0.88,0.175); emblem.castShadow=false; emblem.parent = g;
+        }
+      });
+    }
     // Arme tenue devant — plusieurs pièces (corps/crosse/chargeur/poignée
     // avant) au lieu d'une seule boîte plate, silhouette ajustée au vrai
     // palier d'achat une fois le premier achat résolu (voir
@@ -1485,9 +1968,13 @@ class Agent{
     const t = mkNameTag(this.name, this.tagColor, this.team && this.team.tag); t.position.y=1.7; t.parent = this.mesh; this._tag=t;
   }
   setColor(hex){
-    this._mat.diffuseColor = hexToColor3(hex);
+    // .albedoColor, pas .diffuseColor : mkStdMat construit du PBRMaterial
+    // depuis la Phase 4 (voir mkStdMat) — .diffuseColor y est une propriété
+    // morte (aucune erreur, mais aucun effet non plus), ce qui cassait
+    // silencieusement la remise à la couleur d'équipe au respawn.
+    this._mat.albedoColor = hexToColor3(hex);
     this._ring.material.emissiveColor = hexToColor3(hex);
-    this._accentMat.diffuseColor = hexToColor3(hex).scale(0.42);
+    this._accentMat.albedoColor = hexToColor3(hex).scale(0.42);
   }
   // Anime marche/recul de tir/mort à partir de l'état déjà suivi
   // (speed/lastShotAt/alive) — aucun squelette/rig, cohérent avec le

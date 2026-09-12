@@ -10,8 +10,10 @@ rem deja installe sur le systeme.
 set "PYEXE=%~dp0runtime\python-embed\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 
+rem runtime\serve.py au lieu de "-m http.server" : ce dernier ignore les
+rem requetes Range, ce qui empeche d'avancer dans une piste audio.
 start "" http://localhost:8935
-"%PYEXE%" -m http.server 8935
+"%PYEXE%" "%~dp0runtime\serve.py" 8935 "%~dp0."
 if errorlevel 1 (
   echo.
   echo Impossible de demarrer le serveur du jeu.

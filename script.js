@@ -1525,6 +1525,31 @@ const IDB_DB_NAME = 'esm_db';
 const IDB_STORE = 'saves';
 let _idbPromise = null;
 
+async function fetchLauncherSaveFile(name='main_save.json'){
+  try{
+    const response = await fetch(`/save?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
+    if(!response.ok) return null;
+    const body = await response.json();
+    if(body && body.ok === false) return null;
+    return body && Object.prototype.hasOwnProperty.call(body, 'data') ? body.data : body;
+  }catch(e){
+    return null;
+  }
+}
+
+async function saveLauncherSaveFile(name='main_save.json', data){
+  try{
+    const response = await fetch('/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, data: data || {} })
+    });
+    return response.ok;
+  }catch(e){
+    return false;
+  }
+}
+
 function openSaveDB(){
   if(_idbPromise) return _idbPromise;
   _idbPromise = new Promise((resolve, reject)=>{
@@ -1571,8 +1596,11 @@ function idbDel(key){
 // "Continuer" depuis le menu principal ne puisse pas ressusciter une
 // structure liquidée.
 async function deleteSaveGame(){
-  try{ await idbDel(SAVE_KEY); }catch(e){}
-  try{ localStorage.removeItem(SAVE_KEY); }catch(e){}
+  const id = currentSlotId || 'legacy';
+  await deleteSlotFiles(id);
+  await removeSlotIndexEntry(id);
+  if(getLastSlotId()===id) setLastSlotId('');
+  currentSlotId = null;
 }
 
 // Recopie une éventuelle sauvegarde localStorage héritée vers IndexedDB,
@@ -1965,17 +1993,22 @@ async function flushSaveState(){
 // plutôt que de laisser l'erreur remonter en silence et casser l'action en
 // cours (recrutement, promotion, embauche...).
 async function writeStateToStorage(){
+  const slotId = currentSlotId || 'legacy';
   const json = JSON.stringify(state);
   // Compressé (~60-80% plus léger sur ce type de JSON très répétitif).
   const payload = (typeof LZString !== 'undefined') ? LZString.compressToUTF16(json) : json;
   try{
     await migrateLegacySaveIfNeeded();
-    await idbSet(SAVE_KEY, payload);
+    await idbSet(slotIdbKey(slotId), payload);
+    await saveLauncherSaveFile(slotFileName(slotId), state || {});
+    await touchCurrentSlotIndex();
     return true;
   }catch(e){
     console.warn('Écriture IndexedDB impossible, repli sur localStorage (avec nettoyage si besoin).', e);
     try{
-      localStorage.setItem(SAVE_KEY, payload);
+      localStorage.setItem(slotIdbKey(slotId), payload);
+      await saveLauncherSaveFile(slotFileName(slotId), state || {});
+      await touchCurrentSlotIndex();
       return true;
     }catch(e2){
       console.warn('Sauvegarde localStorage impossible (quota probablement dépassé), nettoyage puis nouvelle tentative.', e2);
@@ -1990,7 +2023,9 @@ async function writeStateToStorage(){
         });
         const retryJson = JSON.stringify(state);
         const retryPayload = (typeof LZString !== 'undefined') ? LZString.compressToUTF16(retryJson) : retryJson;
-        localStorage.setItem(SAVE_KEY, retryPayload);
+        localStorage.setItem(slotIdbKey(slotId), retryPayload);
+        await saveLauncherSaveFile(slotFileName(slotId), state || {});
+        await touchCurrentSlotIndex();
         toast("Partie volumineuse : d'anciennes données peu utiles ont été nettoyées pour continuer à sauvegarder.", 'info');
         return true;
       }catch(e3){
@@ -2106,12 +2141,20 @@ function migrateTournamentPrizeTransactions(s){
     }
   });
 }
-async function loadState(){
+async function loadState(slotId){
   await migrateLegacySaveIfNeeded();
+  await migrateLegacyIntoSlotIndex();
+  const id = slotId || currentSlotId || await resolveContinueSlotId();
   let raw = null;
-  try{ raw = await idbGet(SAVE_KEY); }catch(e){ /* IndexedDB indisponible */ }
+  const launcherSave = await fetchLauncherSaveFile(slotFileName(id));
+  if(launcherSave) {
+    raw = JSON.stringify(launcherSave);
+  }
   if(!raw){
-    try{ raw = localStorage.getItem(SAVE_KEY); }catch(e){}
+    try{ raw = await idbGet(slotIdbKey(id)); }catch(e){ /* IndexedDB indisponible */ }
+  }
+  if(!raw){
+    try{ raw = localStorage.getItem(slotIdbKey(id)); }catch(e){}
   }
   if(!raw) return null;
   try{
@@ -2137,20 +2180,36 @@ async function loadState(){
     migrateArchiveSplitKeys(parsed);
     migrateTournamentPrizeTransactions(parsed);
     migrateMissingStandings(parsed);
+    currentSlotId = id;
+    setLastSlotId(id);
     return parsed;
   } catch(e){ return null; }
 }
 // Décode le contenu brut d'une sauvegarde : les sauvegardes récentes sont
-// compressées (LZString), les anciennes (créées avant l'ajout de la
-// compression) sont du JSON brut. On tente donc la décompression d'abord,
-// et on retombe sur le texte brut si elle échoue ou ne donne rien —
-// aucune sauvegarde existante n'est perdue lors de la mise à jour du jeu.
+// compressées (LZString ; c'est le cas d'IndexedDB/localStorage, voir
+// writeStateToStorage), les autres sont du JSON brut — notamment TOUJOURS le
+// fichier disque (le serveur local l'écrit en clair, voir runtime/serve.py),
+// et les sauvegardes créées avant l'ajout de la compression.
+//
+// Bug corrigé ici : on tentait auparavant la décompression EN PREMIER et on
+// ne retombait sur le texte brut que si elle "échouait ou ne donnait rien" —
+// or LZString.decompressFromUTF16() ne renvoie ni erreur ni valeur vide sur
+// du JSON parfaitement valide qui n'a jamais été compressé, il renvoie une
+// chaîne illisible (ex. "@@@ ") mais bien tronquée non-vide. Résultat :
+// TOUTE sauvegarde lue depuis le fichier disque (donc en particulier
+// "Continuer"/"Charger une Partie" au tout premier essai après un lancement
+// via le raccourci .exe, avant qu'IndexedDB ne soit repeuplé) échouait
+// silencieusement à charger. On tente maintenant un JSON.parse direct
+// d'abord (cas normal : disque, ou sauvegarde antérieure à la compression) ;
+// seul un échec fait basculer sur la décompression (cas IndexedDB/
+// localStorage, réellement compressé donc jamais du JSON valide tel quel).
 function decodeSaveRaw(raw){
+  try{ JSON.parse(raw); return raw; }catch(e){ /* pas du JSON brut, on tente la décompression ci-dessous */ }
   if(typeof LZString !== 'undefined'){
     try{
       const decompressed = LZString.decompressFromUTF16(raw);
       if(decompressed) return decompressed;
-    }catch(e){ /* pas une sauvegarde compressée, on tente le JSON brut ci-dessous */ }
+    }catch(e){ /* pas une sauvegarde compressée non plus : on renvoie le texte tel quel */ }
   }
   return raw;
 }
@@ -2236,11 +2295,286 @@ function migrateLegacyStartDate(s){
 }
 async function hasSave(){
   await migrateLegacySaveIfNeeded();
+  await migrateLegacyIntoSlotIndex();
+  const list = await loadSlotsIndex();
+  if(list.length) return true;
   try{
     const v = await idbGet(SAVE_KEY);
     if(v) return true;
   }catch(e){ /* IndexedDB indisponible */ }
   try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; }
+}
+
+/* ---------------------------------------------------------
+   2ter. SAUVEGARDES MULTIPLES — plusieurs versions d'une même
+   carrière (v01, v02...) et une sauvegarde automatique tournante
+   (filet de sécurité contre une corruption/perte de fichier), avec
+   rotation pour ne pas faire grossir le dossier saves/ indéfiniment
+   sur une carrière de 20+ saisons.
+
+   Volontairement PAS de points de restauration créables à la
+   demande avant un moment à risque (mercato, match décisif...) :
+   ça reviendrait à pouvoir annuler n'importe quelle décision après
+   coup, ce qui casse l'intérêt du jeu de gestion.
+
+   Chaque partie a un identifiant de "carrière" (careerKey, dérivé
+   du diminutif du club) et peut avoir plusieurs emplacements
+   ("slots") : la sauvegarde COURANTE (kind:'manual', celle que la
+   sauvegarde automatique/continue met à jour en place, jamais
+   supprimée toute seule), des versions figées créées à la main
+   (kind:'version', v02, v03... — jamais supprimées toutes seules
+   non plus), et une sauvegarde automatique tournante (kind:'auto')
+   — seule concernée par la rotation (rotateSlots) : elle ne fait
+   donc jamais perdre la sauvegarde courante ni une version créée à
+   la main.
+
+   Un seul fichier d'index (SLOTS_INDEX_FILE, miroir IndexedDB)
+   liste tous les slots avec leurs métadonnées (nom, date, poids)
+   sans avoir à relire chaque fichier de sauvegarde en entier —
+   certaines parties dépassent plusieurs Mo (images Merch importées
+   encodées en base64 directement dans la sauvegarde, voir
+   patch-notes.js item40).
+   --------------------------------------------------------- */
+const SLOTS_INDEX_IDB_KEY = 'esm_slots_index_v1';
+const SLOTS_INDEX_FILE = 'slots_index.json';
+const LAST_SLOT_KEY = 'esm_last_slot_v1';
+const AUTO_SAVE_KEEP = 3;           // sauvegardes automatiques tournantes conservées, par carrière
+const AUTO_SNAPSHOT_EVERY_DAYS = 7; // fréquence (en jours en jeu) de la sauvegarde automatique tournante
+
+let currentSlotId = null;
+
+// La sauvegarde historique (avant l'introduction des slots) devient le slot
+// spécial 'legacy', SANS jamais copier ni renommer aucun fichier —
+// slotIdbKey('legacy')/slotFileName('legacy') pointent directement vers les
+// emplacements d'origine (SAVE_KEY, main_save.json), donc aucune partie en
+// cours n'est jamais perdue lors de la mise à jour du jeu.
+function slotIdbKey(id){ return id==='legacy' ? SAVE_KEY : `esm_slot_${id}`; }
+function slotFileName(id){ return id==='legacy' ? 'main_save.json' : `slot_${id}.json`; }
+function genSlotId(){ return `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`; }
+function careerKeyFor(s){ return ((s && s.org && s.org.tag) || 'club').toLowerCase(); }
+function formatSaveSize(bytes){
+  if(bytes < 1024*1024) return `${Math.max(1, Math.round(bytes/1024))} Ko`;
+  return `${(bytes/1024/1024).toFixed(1)} Mo`;
+}
+function slotSizeBytes(stateObj){
+  try{ return new Blob([JSON.stringify(stateObj)]).size; }catch(e){ return JSON.stringify(stateObj).length; }
+}
+
+/* PAS de cache entre deux appels : relit le disque (puis IndexedDB en repli)
+   à chaque fois. Un cache qui survit à la page semblait anodin en solo,
+   mais l'index est un fichier UNIQUE partagé — si un autre processus a écrit
+   entre-temps (ex. le launcher relancé, ou pendant le développement une
+   session de test tournant sur le même dossier saves/ que la partie
+   réellement ouverte), le prochain upsertSlotIndexEntry() d'ici serait parti
+   d'une copie périmée et aurait réécrit le fichier ENTIER par-dessus,
+   effaçant les entrées ajoutées par l'autre. Vécu concrètement : le nom et
+   le diminutif du club d'une sauvegarde remplacés par les valeurs par
+   défaut. Un fichier de quelques Ko relu à chaque fois n'a aucun coût
+   perceptible, contrairement au risque. */
+async function loadSlotsIndex(){
+  let list = null;
+  try{ list = await fetchLauncherSaveFile(SLOTS_INDEX_FILE); }catch(e){}
+  if(!Array.isArray(list)){
+    try{
+      const raw = await idbGet(SLOTS_INDEX_IDB_KEY);
+      list = raw ? JSON.parse(raw) : null;
+    }catch(e){ list = null; }
+  }
+  return Array.isArray(list) ? list : [];
+}
+async function saveSlotsIndex(list){
+  try{ await idbSet(SLOTS_INDEX_IDB_KEY, JSON.stringify(list)); }catch(e){}
+  try{ await saveLauncherSaveFile(SLOTS_INDEX_FILE, list); }catch(e){}
+}
+async function upsertSlotIndexEntry(entry){
+  const list = await loadSlotsIndex();
+  const i = list.findIndex(s=>s.id===entry.id);
+  if(i>=0) list[i] = { ...list[i], ...entry };
+  else list.push(entry);
+  await saveSlotsIndex(list);
+  return list;
+}
+async function removeSlotIndexEntry(id){
+  const list = (await loadSlotsIndex()).filter(s=>s.id!==id);
+  await saveSlotsIndex(list);
+  return list;
+}
+// Migration transparente, une seule fois : si aucun index n'existe encore
+// mais qu'une sauvegarde 'legacy' est présente sur disque, elle rejoint
+// l'index comme premier slot manuel — opération purement de métadonnées,
+// aucune donnée déplacée.
+async function migrateLegacyIntoSlotIndex(){
+  const list = await loadSlotsIndex();
+  if(list.length) return;
+  const legacyRaw = await fetchLauncherSaveFile('main_save.json');
+  if(!legacyRaw) return;
+  list.push({
+    id:'legacy', kind:'manual', careerKey: careerKeyFor(legacyRaw),
+    orgName: (legacyRaw.org && legacyRaw.org.name) || 'Ma carrière',
+    tag: (legacyRaw.org && legacyRaw.org.tag) || '',
+    version:1, checkpointType:null, customName:null,
+    inGameDate: legacyRaw.date || null,
+    createdAt: Date.now(), updatedAt: Date.now(),
+    sizeBytes: slotSizeBytes(legacyRaw),
+  });
+  await saveSlotsIndex(list);
+}
+function getLastSlotId(){ try{ return localStorage.getItem(LAST_SLOT_KEY) || ''; }catch(e){ return ''; } }
+function setLastSlotId(id){ try{ localStorage.setItem(LAST_SLOT_KEY, id||''); }catch(e){} }
+// Slot à charger pour "Continuer" : le dernier réellement chargé/joué sur cet
+// appareil, sinon le plus récemment mis à jour dans l'index, sinon 'legacy'.
+async function resolveContinueSlotId(){
+  const last = getLastSlotId();
+  if(last) return last;
+  const list = await loadSlotsIndex();
+  if(list.length) return list.slice().sort((a,b)=> b.updatedAt-a.updatedAt)[0].id;
+  return 'legacy';
+}
+
+function slotDisplayName(slot){
+  if(slot.customName) return slot.customName;
+  const base = slot.orgName || 'Carrière';
+  if(slot.kind==='version') return `${base} (v${String(slot.version||1).padStart(2,'0')})`;
+  if(slot.kind==='auto') return `${base} — Auto`;
+  return base;
+}
+function slotKindLabel(slot){
+  return { manual:'Sauvegarde', version:'Version', auto:'Auto' }[slot.kind] || slot.kind;
+}
+// Écrit `stateObj` dans le slot `id` (fichier + IndexedDB) et fusionne `meta`
+// dans son entrée d'index — brique de base réutilisée par la création de
+// version et l'auto-save tournante. Jamais utilisée pour la sauvegarde
+// courante (voir touchCurrentSlotIndex), qui ne doit pas se voir
+// réattribuer un `kind` au hasard à chaque écriture.
+async function writeSlot(id, stateObj, meta){
+  const json = JSON.stringify(stateObj);
+  const payload = (typeof LZString !== 'undefined') ? LZString.compressToUTF16(json) : json;
+  try{ await idbSet(slotIdbKey(id), payload); }catch(e){}
+  await saveLauncherSaveFile(slotFileName(id), stateObj);
+  await upsertSlotIndexEntry({
+    id, careerKey: careerKeyFor(stateObj),
+    orgName: (stateObj.org && stateObj.org.name) || 'Ma carrière',
+    tag: (stateObj.org && stateObj.org.tag) || '',
+    inGameDate: stateObj.date || null,
+    updatedAt: Date.now(),
+    sizeBytes: slotSizeBytes(stateObj),
+    ...meta,
+  });
+}
+// Met à jour l'entrée d'index de la sauvegarde COURANTE après chaque écriture
+// normale (voir writeStateToStorage) — ne touche jamais `kind`/`version` d'un
+// slot déjà existant, ne les fixe (manuel, v01) que si le slot est tout neuf.
+async function touchCurrentSlotIndex(){
+  if(!state) return;
+  const id = currentSlotId || 'legacy';
+  const list = await loadSlotsIndex();
+  const existing = list.find(s=>s.id===id);
+  const patch = {
+    id, careerKey: careerKeyFor(state),
+    orgName: (state.org && state.org.name) || 'Ma carrière',
+    tag: (state.org && state.org.tag) || '',
+    inGameDate: state.date || null,
+    updatedAt: Date.now(),
+    sizeBytes: slotSizeBytes(state),
+  };
+  if(!existing) Object.assign(patch, { kind:'manual', version:1, checkpointType:null, customName:null, createdAt:Date.now() });
+  await upsertSlotIndexEntry(patch);
+}
+// Purge le fichier physique d'un slot (disque + IndexedDB), sans toucher à
+// l'index — toujours appelée avec removeSlotIndexEntry (deleteSlot) ou
+// rotateSlots juste après, jamais seule.
+async function deleteSlotFiles(id){
+  try{ await idbDel(slotIdbKey(id)); }catch(e){}
+  try{ localStorage.removeItem(slotIdbKey(id)); }catch(e){}
+  try{ await fetch(`/save?name=${encodeURIComponent(slotFileName(id))}`, { method:'DELETE' }); }catch(e){}
+}
+async function deleteSlot(id){
+  await deleteSlotFiles(id);
+  await removeSlotIndexEntry(id);
+  if(currentSlotId===id) currentSlotId = null;
+  if(getLastSlotId()===id) setLastSlotId('');
+}
+async function renameSlot(id, newName){
+  const list = await loadSlotsIndex();
+  const slot = list.find(s=>s.id===id);
+  if(!slot) return;
+  slot.customName = (newName||'').trim() || null;
+  await saveSlotsIndex(list);
+}
+// Ne conserve que les `keep` slots les plus récents pour un même
+// (careerKey, kind) — appelée après chaque création d'un slot auto, jamais
+// pour les sauvegardes manuelles/versions (celles-ci appartiennent au
+// joueur, jamais supprimées toutes seules).
+async function rotateSlots(careerKey, kind, keep){
+  const list = await loadSlotsIndex();
+  const matching = list
+    .filter(s=> s.careerKey===careerKey && s.kind===kind)
+    .sort((a,b)=> b.updatedAt - a.updatedAt);
+  const toDrop = matching.slice(keep);
+  if(!toDrop.length) return;
+  for(const slot of toDrop){ await deleteSlotFiles(slot.id); }
+  const dropIds = new Set(toDrop.map(s=>s.id));
+  await saveSlotsIndex((await loadSlotsIndex()).filter(s=>!dropIds.has(s.id)));
+}
+// "Enregistrer sous une nouvelle version" : fige l'état actuel dans un
+// NOUVEAU slot numéroté (v02, v03...) et bascule la sauvegarde courante
+// dessus — les prochaines sauvegardes iront sur cette nouvelle version,
+// l'ancienne restant intacte et rechargeable depuis l'écran des sauvegardes.
+async function createVersionSlot(customName){
+  if(!state) return null;
+  const careerKey = careerKeyFor(state);
+  const list = await loadSlotsIndex();
+  const existingVersions = list.filter(s=> s.careerKey===careerKey && (s.kind==='manual' || s.kind==='version'));
+  const nextVersion = 1 + existingVersions.reduce((max,s)=> Math.max(max, s.version||1), 0);
+  const id = genSlotId();
+  await writeSlot(id, state, { kind:'version', version:nextVersion, checkpointType:null, customName: (customName||'').trim() || null, createdAt:Date.now() });
+  currentSlotId = id;
+  setLastSlotId(id);
+  return id;
+}
+// Sauvegarde automatique tournante : un vrai fichier à part (pas la
+// sauvegarde courante) sur lequel se replier si celle-ci venait à être
+// corrompue ou perdue — actualisée tous les AUTO_SNAPSHOT_EVERY_DAYS jours
+// en jeu, jamais en temps réel (voir maybeCreateAutoSnapshot). Volontairement
+// PAS déclenchable à la demande par le joueur (voir le module plus haut) :
+// seule la rotation automatique décide quand elle se recrée.
+async function autoSaveRotatingSnapshot(){
+  if(!state || !state.org) return;
+  const careerKey = careerKeyFor(state);
+  const id = genSlotId();
+  await writeSlot(id, state, { kind:'auto', version:null, checkpointType:null, customName:null, createdAt:Date.now() });
+  await rotateSlots(careerKey, 'auto', AUTO_SAVE_KEEP);
+}
+// Actualise la sauvegarde automatique tournante tous les AUTO_SNAPSHOT_EVERY_DAYS
+// jours en jeu — appelée une seule fois par jour avancé AVEC SUCCÈS (voir
+// safeAdvanceDay), jamais depuis l'intérieur d'advanceDay() elle-même qui a
+// trop de points de sortie pour y accrocher ça proprement.
+function maybeCreateAutoSnapshot(){
+  if(!state || !state.org) return;
+  state._autoSnapshotDayCounter = (state._autoSnapshotDayCounter||0) + 1;
+  if(state._autoSnapshotDayCounter >= AUTO_SNAPSHOT_EVERY_DAYS){
+    state._autoSnapshotDayCounter = 0;
+    autoSaveRotatingSnapshot();
+  }
+}
+// Espace total occupé par toutes les sauvegardes (tous slots confondus) —
+// affiché dans l'écran "Charger une partie" avec un plafond purement
+// indicatif (jamais bloquant, la partie reste locale sur le disque du joueur).
+async function totalSavesSizeBytes(){
+  const list = await loadSlotsIndex();
+  return list.reduce((sum,s)=> sum + (s.sizeBytes||0), 0);
+}
+// "Nettoyer les sauvegardes automatiques" : ne garde qu'1 auto-save par
+// carrière, sans jamais toucher aux sauvegardes/versions manuelles
+// (celles-ci appartiennent au joueur) — bouton de secours pour libérer de la
+// place sur une très longue carrière (20+ saisons) sans attendre la
+// rotation naturelle.
+async function cleanupOldAutoSlots(){
+  const list = await loadSlotsIndex();
+  const careerKeys = [...new Set(list.map(s=>s.careerKey))];
+  for(const careerKey of careerKeys){
+    await rotateSlots(careerKey, 'auto', 1);
+  }
 }
 
 /* ---------------------------------------------------------
@@ -10875,7 +11209,8 @@ function initMainMenu(){
     if(ok){ btnContinue.style.opacity = ''; btnContinue.style.pointerEvents = ''; }
   });
   btnContinue.addEventListener('click', async ()=>{
-    const loaded = await loadState();
+    const slotId = await resolveContinueSlotId();
+    const loaded = await loadState(slotId);
     if(loaded){
       state = loaded; installBudgetGuard();
       showScreen('screen-dashboard'); initDashboard();
@@ -10890,18 +11225,12 @@ function initMainMenu(){
     showScreen('screen-newgame');
     initNewGameScreen();
   });
+  // "Charger une Partie" ouvre désormais le sélecteur de sauvegardes (voir
+  // openLoadGameModal) au lieu de charger instantanément la seule sauvegarde
+  // qui pouvait exister auparavant — plusieurs versions/carrières coexistent
+  // maintenant (voir le module SAUVEGARDES MULTIPLES juste après hasSave()).
   document.getElementById('btnLoadGame').addEventListener('click', async ()=>{
-    const loaded = await loadState();
-    if(loaded){
-      state = loaded; installBudgetGuard();
-      showScreen('screen-dashboard'); initDashboard();
-      if(state.bankrupt){
-        const summary = state.bankruptSummary || { finalBudget:state.budget, durationDays:computeGameDurationDays(), actionsPerformed:state.actionsPerformed||0, cause:`Faillite financière (${formatMoney(BANKRUPTCY_THRESHOLD)})` };
-        freezeGameForBankruptcy();
-        showBankruptcyModal(summary);
-      }
-    }
-    else toast("Aucune sauvegarde trouvée.", 'error');
+    await openLoadGameModal();
   });
   document.getElementById('btnMultiplayer').addEventListener('click', ()=>{
     toast('Le mode Multijoueur arrive dans une prochaine mise à jour.', 'info');
@@ -10910,9 +11239,43 @@ function initMainMenu(){
     showScreen('screen-options');
     initOptionsScreen();
   });
-  document.getElementById('btnQuit').addEventListener('click', ()=>{
-    toast('Merci d\'avoir joué à Esports Director !', 'info');
-  });
+  // Quitter pour de vrai : fermer la fenêtre suffit à arrêter TOUT le jeu.
+  // Le lanceur (voir devtools/Launcher.cs) surveille la fenêtre et coupe le
+  // serveur local dès qu'elle disparaît — donc plus de processus qui traîne.
+  //
+  // window.close() était autrefois inutile ici : le jeu s'ouvrait dans un
+  // onglet de navigateur ordinaire, et un onglet que l'utilisateur a ouvert
+  // lui-même refuse de se fermer par script. D'où le simple message de
+  // remerciement qui tenait lieu de "quitter". Depuis le lanceur, le jeu
+  // vit dans sa propre fenêtre d'application, qui a le droit de se fermer.
+  const quitBtn = document.getElementById('btnQuit');
+  if(quitBtn){
+    quitBtn.onclick = ()=>{
+      openCustomConfirmModal({
+        title: 'Quitter le jeu ?',
+        message: 'Voulez-vous sauvegarder la partie avant de fermer ?',
+        confirmText: 'Quitter sans sauvegarder',
+        cancelText: 'Annuler',
+        extraButtonText: 'Sauvegarder',
+        extraButtonAction: ()=>{
+          try { if(typeof state !== 'undefined' && state) saveState(); } catch(e){}
+          try { if(typeof flushSaveState === 'function') flushSaveState(); } catch(e){}
+          window.close();
+          setTimeout(()=>{
+            toast("Fermez la fenêtre pour quitter — merci d'avoir joué à Esports Director !", 'info');
+          }, 400);
+        },
+        onConfirm: ()=>{
+          try { if(typeof flushSaveState === 'function') flushSaveState(); } catch(e){}
+          window.close();
+          setTimeout(()=>{
+            toast("Fermez la fenêtre pour quitter — merci d'avoir joué à Esports Director !", 'info');
+          }, 400);
+        },
+        onCancel: ()=>{}
+      });
+    };
+  }
 
   // Vue agrandie des notes de patch — reprend le contenu déjà affiché dans
   // la carte compacte (version + liste) plutôt que de le dupliquer, pour
@@ -10950,155 +11313,13 @@ function initMainMenu(){
     });
   }
 }
-// Historique COMPLET des patchs, la version en cours en premier — chaque
-// tâche accomplie ajoute son entrée dans les notes de la version EN COURS
-// (PATCH_NOTES_HISTORY[0], jamais retirée), et un changement MANUEL du
-// numéro de version (jamais fait automatiquement, voir menu-footer/
-// mainmenu-patchnotes-version — les DEUX doivent être mis à jour ensemble)
-// ajoute une nouvelle entrée en tête avec des notes vides plutôt que
-// d'écraser l'historique. La carte compacte du menu principal n'affiche
-// qu'un extrait de la version en cours (voir renderPatchnotesWidget) ; le
-// popup complet (openPatchNotesModal) affiche la liste entière de la
-// version consultée, et se navigue entre versions via les flèches
-// précédent/suivant (voir renderPatchNotesModalVersion).
-const PATCH_NOTES_HISTORY = [
-  { version:'V0.3.3', notes: [
-    { key:'menu.patchnotes.item58', fr:"Corrigé un plantage au passage au jour suivant : l'annonce mensuelle du \"joueur du mois\" sur les réseaux sociaux pouvait planter pour un joueur sans rating moyen calculé" },
-    { key:'menu.patchnotes.item57', fr:"Priorisation des cartes à l'entraînement (Stratégie Valostrike) : nouveau bouton \"Classer automatiquement\" au-dessus du tableau, qui trie instantanément toutes vos cartes du meilleur niveau d'équipe au plus faible — sans avoir à tout glisser-déposer une par une à chaque fois" },
-    { key:'menu.patchnotes.item56', fr:"Écran de création simplifié : les cartes de personnalisation du passé du directeur et d'aperçu du Conseiller Exécutif ont été retirées de l'écran — le profil \"Ex-joueur professionnel\" s'applique par défaut, et le Conseiller Exécutif reste généré aléatoirement comme avant, simplement sans aperçu ni régénération possible avant de lancer la partie" },
-    { key:'menu.patchnotes.item55', fr:"Zenith et Outpost ont maintenant une vraie identité de décor : un relief propre au biome se dessine tout autour de la zone de jeu (collines pour Zenith, dunes pour Outpost — jamais sous vos pieds, la zone jouable reste plate), avec un vrai point de repère visible de loin (arche de grès à Outpost, arbre ancestral à Zenith) et un décor bien moins générique tout autour" },
-    { key:'menu.patchnotes.item54', fr:"Corrigé un vrai bug d'affichage sur l'écran de création : sur certaines hauteurs de fenêtre, la carte \"Nom de la structure\" pouvait se comprimer et faire apparaître Pays/Couleur/Blason par-dessus les champs suivants au lieu de les afficher normalement. La carte \"Première section eSport\", elle, ne s'étire plus inutilement pour ne plus laisser un grand vide sous les jeux proposés" },
-    { key:'menu.patchnotes.item53', fr:"Nouveau personnage à la création du club : votre Conseiller Exécutif, désormais prévisualisé (avec un bouton pour en générer un autre) directement sur l'écran de création, pas seulement une fois la partie lancée. Généré une fois pour toute la partie (identité, spécialités notées en étoiles, personnalité), consultable ensuite depuis une carte dédiée sur la page Général — pour l'instant une fiche à consulter, sans encore d'analyses ou d'avis automatiques pendant la partie" },
-    { key:'menu.patchnotes.item52', fr:"Le passé de votre directeur ne se limite plus à un bonus unique le jour de la création : chaque profil a maintenant un vrai effet qui continue de jouer tout au long de la partie (regain de réputation, optimisation budgétaire ou croissance des supporters selon le profil, visible en jeu sur la carte Organisation et dès l'écran de création)" },
-    { key:'menu.patchnotes.item51', fr:"Le terme \"manager\" pour vous désigner (vous, à la tête de l'organisation) devient \"directeur\" un peu partout (création du club, page Général) — le poste de Manager que vous recrutez, lui, sur le marché du staff, ne change pas de nom, c'est un métier différent" },
-    { key:'menu.patchnotes.item50', fr:"Votre directeur a maintenant un vrai insigne personnel (médaillon doré avec vos initiales) affiché à côté de son nom dans la carte Organisation de la page Général, à la place de l'ancienne icône générique — et il apparaît déjà en aperçu, mis à jour en direct, dès l'écran de création pendant que vous tapez votre nom" },
-    { key:'menu.patchnotes.item49', fr:"Le passé de votre directeur (choisi à la création) s'affiche maintenant en jeu, dans la carte Organisation de la page Général — avant, ce choix disparaissait après le premier écran" },
-    { key:'menu.patchnotes.item48', fr:"Cartes de niveau de départ (création du club) : le nombre de supporters de départ s'affiche enfin sur la carte, avec la réputation et le budget déjà présents. Sans ça, \"Streamer qui se lance\" avait l'air strictement moins bon que \"Structure sponsorisée\" (moins de réputation ET moins de budget) alors que son vrai atout — une communauté énorme dès le départ — restait invisible" },
-    { key:'menu.patchnotes.item47', fr:"Nouveau à la création du club : le passé de votre directeur (Ex-joueur professionnel, Analyste data & finance, Spécialiste en communication, Directeur polyvalent) donne un vrai bonus de départ — réputation, budget ou supporters selon le profil choisi, en plus du scénario de départ" },
-    { key:'menu.patchnotes.item46', fr:"Écran de choix du slot Challenger de départ (Valostrike) : chaque équipe a maintenant un médaillon avec son initiale plutôt qu'un simple bloc de texte, coins plus généreux et relief — moins plat que les rectangles bruts d'avant" },
-    { key:'menu.patchnotes.item45', fr:"Retiré le choix d'icône du profil directeur (à la création du club) : la grille de petites icônes génériques n'apportait rien de bien lisible, seul le nom reste personnalisable" },
-    { key:'menu.patchnotes.item44', fr:"Nouveau : pays de la structure à choisir à la création du club, et notoriété des sponsors (Locale/Nationale/Internationale, visible en badge sur chaque offre) — les sponsors les plus prestigieux paient bien plus mais n'approchent qu'un club déjà réputé. Des sponsors de paris sportifs peuvent désormais approcher le club : très généreux partout, mais risqués (perte de supporters, de réputation, polémique sur les réseaux) dans les pays où ce type de publicité est mal vue ou interdite" },
-    { key:'menu.patchnotes.item43', fr:"Bassin de sponsors potentiels triplé (48 → 192 marques fictives) pour éviter les répétitions d'offres sur les longues carrières" },
-    { key:'menu.patchnotes.item42', fr:"Concepteur de produit Merch entièrement réorganisé pour tenir sur un seul écran, sans défilement : aperçu et catégorie à gauche, tous les réglages (nom, couleur, matière, technique, prix, quantité) à droite. Catalogue recentré sur le gear esport — Clavier, Souris et Chaise gaming rejoignent Maillot, Casquette, Mug, Sac, Porte-clés et Gourde avec de vrais visuels produit recolorables, tandis que Veste, Kit Pro, Mascotte peluche, Chaussettes, Lunettes et Poster ont été retirés du catalogue" },
-    { key:'menu.patchnotes.item41', fr:"Visuels produit Merch nettement plus soignés : chaque silhouette (maillot, casquette, mug, sac, veste, gourde...) gagne de vrais détails de finition (col, coutures, anse, liseré, boutons) et un rendu en volume — reflet brillant, ombrage et ombre portée — plutôt qu'un aplat de couleur plat. Rendu 100% généré (pas de vraie IA d'image : ça demanderait une clé API payante et visible par tous, incompatible avec un jeu local sans serveur), mais un résultat bien plus proche d'un vrai mockup produit. Corrigé au passage un défaut d'affichage sur la veste (une tache grise près du col) et remis le fond de carte en dégradé aux couleurs du club (à la place du fond uni + halo)" },
-    { key:'menu.patchnotes.item40', fr:"Concepteur de produit Merch : personnalisation visuelle complète du produit — couleur principale au choix, option dégradé (deux couleurs) à la place d'une couleur unie, motif appliqué directement sur le produit (rayures ou pois, avec ses propres couleurs), et surtout un vrai import d'image personnelle (PNG/JPG/WEBP) qui remplace la silhouette générée sur le visuel du produit, entièrement en local dans la sauvegarde. Le fond derrière le produit, lui, reprend désormais toujours les couleurs du blason du club, pour que chaque produit reste visuellement rattaché à l'organisation" },
-    { key:'menu.patchnotes.item39', fr:"Boutique Merch rapprochée d'un vrai éditeur de produits dérivés, sans fausse promesse de photo (aucun hébergement d'image possible dans ce jeu, donc pas de vrai mockup ni d'upload de logo). Chaque produit a maintenant une vraie silhouette (maillot, casquette, mug, sac, gourde, lunettes...) en couleur du club, plutôt qu'une icône plate dans un carré dégradé. Un champ « texte / slogan » optionnel s'affiche directement sur le visuel du produit. Et une nouvelle Technique d'impression (Numérique/Sérigraphie/Broderie) vient s'ajouter à la matière et la catégorie comme 3e levier économique — la sérigraphie coûte cher à préparer mais revient très peu cher à l'unité ensuite, l'inverse du numérique" },
-    { key:'menu.patchnotes.item38', fr:"Concepteur de produit Merch : l'icône de la Casquette (un chapeau de cowboy vu de côté, illisible en petit) est remplacée par une icône de toque, nettement plus reconnaissable comme couvre-chef ; l'icône de la Mascotte peluche (une simple empreinte de patte, ambiguë) devient un dragon. Le nom de la catégorie sélectionnée s'affiche aussi en toutes lettres à côté du titre \"Catégorie\" plutôt que de compter uniquement sur l'icône" },
-    { key:'menu.patchnotes.item37', fr:"Concepteur de produit Merch : le curseur de matière changeait visuellement de longueur selon le libellé affiché à côté (« Coton standard » vs « Textile technique », de tailles différentes) — l'étiquette a maintenant une largeur fixe, le curseur ne bouge plus. Retiré au passage le choix de couleur par produit (primaire/accent) : chaque produit reprend directement les couleurs du blason du club, comme au tout début" },
-    { key:'menu.patchnotes.item36', fr:"Fiche produit Merch : le type de produit (Maillot, Casquette, Mug...) s'affiche enfin en texte sur la carte à côté de la matière — jusqu'ici seule la petite icône l'indiquait, impossible à deviner à coup sûr. Nouvelle catégorie ajoutée au passage : Lunettes" },
-    { key:'menu.patchnotes.item35', fr:"Fiche produit Merch clarifiée : le bilan du mois écoulé affiche maintenant Commandé/Vendu/Invendu côte à côte au lieu du seul nombre vendu, et le champ de production porte désormais une étiquette \"Prochaine production\" pour ne plus le confondre avec ce bilan passé" },
-    { key:'menu.patchnotes.item34', fr:"Concepteur de produit Merch : prix de vente et quantité à produire ne sont plus pré-remplis avec une suggestion — ils démarrent à 0 et le restent tant que vous ne les saisissez pas vous-même, plutôt que de deviner un chiffre à votre place. Le bouton \"Lancer ce produit\" reste désactivé tant que ces deux champs n'ont pas de vraie valeur (prix au-dessus du coût de fabrication, quantité supérieure à 0)" },
-    { key:'menu.patchnotes.item33', fr:"3 ajustements sur le concepteur de produit Merch, suite à des retours directs. La quantité à produire au lancement ne bouge plus toute seule quand on déplace le curseur de matière (seule sa note de coût se met à jour avec le nouveau coût unitaire) — jusqu'ici elle se recalculait automatiquement à chaque glissement, gênant à l'usage. L'étiquette de matière (ex. « Textile technique ») est repositionnée juste à côté du curseur au lieu d'être plaquée à l'autre bout de l'écran. Et surtout, coût de fabrication et demande dépendent enfin de la CATÉGORIE du produit, pas seulement de sa matière : un mug ou un porte-clés coûtent nettement moins cher à produire qu'une veste au même niveau de matière, et se vendent en bien plus gros volume (achat d'impulsion) — jusqu'ici un mug \"Textile technique\" coûtait exactement comme un maillot \"Textile technique\", ce qui n'avait aucun sens" },
-    { key:'menu.patchnotes.item32', fr:"Concepteur de produit Merch approfondi, sur deux retours successifs. D'abord retiré le système de gammes à cases cliquables (Basique/Premium/Collector, puis une version à 5 « matières » en cartes — toujours jugée trop proche d'un choix de pack tout fait) : un seul curseur continu de qualité de matière (Coton standard → Matériaux nobles) fait maintenant évoluer en douceur coût de fabrication, frais de lancement et sensibilité de la demande, sans aucune case à cocher. Ensuite ajouté un vrai contrôle économique par produit : prix de vente librement fixé (au lieu d'un prix imposé), quantité à produire dès le lancement (au lieu d'attendre le mois suivant pour la régler), avec le coût de fabrication à l'unité et les frais de lancement affichés en direct pendant qu'on ajuste. Corrigé au passage : le bouton \"Lancer ce produit\" restait grisé après avoir tapé un nom, tant qu'aucun autre champ n'était retouché ensuite" },
-    { key:'menu.patchnotes.item31', fr:"Boutique Merch retravaillée : chaque produit a maintenant sa propre couleur (primaire + accent), choisie dans le concepteur plutôt qu'imposée par le blason du club ; bannière animée en tête de boutique aux couleurs du club (toujours pas de vraie photo, mais un fond vivant plutôt qu'un bloc plat) ; bandeau des sponsors sous contrat affiché au-dessus du catalogue (en texte, faute de vrais logos de marque importés) ; les statistiques financières (profit, historique mensuel) ont été retirées de l'onglet Merch et rejoignent Finances, où elles se recoupent avec les autres revenus du club" },
-    { key:'menu.patchnotes.item30', fr:"Nouvel onglet Finances > Merch : concevez votre propre catalogue de produits dérivés (maillot, veste, casquette, mug, sac, porte-clés, poster, mascotte peluche, chaussettes, gourde), chacun dans une gamme Basique/Premium/Collector avec son propre coût de lancement, sa marge et sa demande — la demande dépend de vos supporters et de votre réputation, avec une sensibilité très différente par gamme (le Collector ne se vend quasiment qu'aux grandes organisations réputées, le Basique se vend dès une petite base de fans). Chaque mois, vous fixez vous-même le volume à produire par produit avant que la demande réelle ne soit connue : produire trop peu laisse des ventes sur la table, trop laisse du stock invendu payé pour rien" },
-  ] },
-  { version:'V0.3.2', notes: [
-  { key:'menu.patchnotes.item29', fr:"Correction d'un vrai bug de blason (suite) : ouvrir la Forge d'Identité depuis le crayon \"Modifier le blason\" de la fiche de structure (Club > profil) l'affichait bien techniquement, mais complètement invisible ET inerte, cachée SOUS la fiche encore ouverte au-dessus (un souci de calque déjà rencontré et corrigé une fois pour la fiche joueur, pas encore pour la Forge) — impossible de valider un nouveau blason par ce chemin, ce qui explique que le blason personnalisé n'apparaissait jamais en jeu. La Forge s'affiche maintenant bien au premier plan, utilisable normalement" },
-  { key:'menu.patchnotes.item28', fr:"Correction d'un vrai bug de blason : votre organisation affichait le bon blason personnalisé (Forge d'Identité) dans la barre latérale et le tableau de bord, mais un blason générique généré au hasard à partir de son nom dans TOUS les classements/brackets (RLCS, Kickoff, Ranked, World Hub, Ascension...) — la fonction partagée par ces tableaux ne savait pas reconnaître votre propre ligne. Elle utilise maintenant le vrai blason personnalisé partout où votre organisation apparaît" },
-  { key:'menu.patchnotes.item27', fr:"5 nouvelles pistes hip-hop/soul instrumentales ajoutées à la playlist du menu (Energetic Lo-Fi Hip-Hop, Smooth Lo-Fi Hip Hop, Lo-Fi Fashion Chill Hip Hop, Breakfast In Paris, Powerful Trap Beat), en plus des lofi déjà présentes" },
-  { key:'menu.patchnotes.item27', fr:"Refonte du pop-up de simulation en direct Rocket Champ : les deux équipes affichent maintenant leur blason (au lieu d'un panneau texte nu), et un nouveau mode « Vue de terrain » propose un mini-terrain animé vu du dessus (ballon et voitures qui dérivent, but qui s'illumine et bannière au moment du score, fil de buts compact en dessous) — choix disponible juste avant chaque match, à côté du mode texte (désormais lui aussi habillé : blasons, entrées de buts avec icône et animation d'apparition)" },
-  { key:'menu.patchnotes.item26', fr:"Icône Call of Duty changée : elle réutilisait la même mire de visée (crosshair) que Valostrike, ne le distinguant pas visuellement des autres jeux ; remplacée par une icône d'arme propre à Call of Duty" },
-  { key:'menu.patchnotes.item25', fr:"Forge d'identité : l'anneau/liseré des accents « ring » et « double » suivait la boîte rectangulaire de l'aperçu et se faisait couper n'importe comment sur les formes à pointes (Écusson, Hexagone, Sceau...) — visible aux angles où l'accent débordait ou disparaissait au lieu de longer le contour. L'anneau est maintenant construit en épousant exactement le même contour que la forme choisie, quelle que soit sa taille d'affichage (aperçu de la Forge, barre latérale, blasons d'équipes adverses)" },
-  { key:'menu.patchnotes.item24', fr:"Deux bugs de recrutement corrigés pour Rocket Champ (et plus largement tout jeu hors Valostrike) : le bouton \"Faire une offre\" affiché sur la fiche d'un agent libre échouait toujours avec \"Ce joueur n'est pas transférable pour le moment\" au lieu d'ouvrir la négociation, et affichait en prime un prix de transfert au lieu d'un salaire mensuel comme il se doit pour un agent libre. Par ailleurs, chaque équipe Rocket Champ se voyait polluer ses statistiques de terrain avec les 7 noms de cartes Valostrike (Quai IX, Vertex...), jamais joués, au lieu de ses vraies arènes (Neo Tokyo, DFH Stadium...) — sans impact sur la simulation des matchs, mais des données trompeuses" },
-  { key:'menu.patchnotes.item23', fr:"Le jeu s'appelle désormais Esports Director (anciennement eSports Manager) — menu principal, titre de la fenêtre, options et fenêtre du serveur local mis à jour. Écran de création : le blason affiché avant toute personnalisation était tiré au hasard à partir du nom de la structure et pouvait tomber sur des combinaisons forme/icône peu flatteuses (ex. hexagone + montagne) ; il s'agit maintenant d'un blason classique fixe (écu + couronne + liseré), qui ne varie plus qu'avec la couleur choisie" },
-  { key:'menu.patchnotes.item22', fr:"Forge d'identité : correction du positionnement de l'emblème sur la forme Blason — centré sur tout le carré englobant, il débordait dans la pointe basse (rogné par le contour) tout en laissant un vide au-dessus, rendant l'ensemble bancal (« les formes et accents se placent mal »). L'emblème est maintenant recentré sur la partie utile (rectangulaire) du blason, quelle que soit sa taille d'affichage (aperçu de la Forge, barre latérale, blasons d'équipes adverses). Les autres formes (hexagone, cercle, losange, carré, octogone, goutte), déjà symétriques, sont inchangées" },
-  { key:'menu.patchnotes.item21', fr:"Nouvelle carte jouable : Quai IX. Port commercial nocturne avec un vrai moteur 3D (comme Zenith et Outpost). Trois passes de correction suite à des retours directs. D'abord un vrai réseau de couloirs (milieu connecté, 3 sorties de spawn attaque, 2 approches par site en plus du flanc). Puis un milieu resserré en couloirs étroits (2-3 cases au lieu de 6-13) et le site B rapproché du spawn défense par une liaison directe. Enfin, sur un dernier retour (« couloirs trop directs, ajoute des objets cohérents ») : tous les axes sont désormais en zigzag (chaque couloir tourne au moins deux fois au lieu d'aller en ligne droite), et le décor est nettement plus dense — lampadaires le long de chaque tronçon, caisses/tonneaux/palettes/sacs de sable en alternance sur les bords, panneaux directionnels aux carrefours, véhicule et blocs de béton en plus sur le site A. Ajoutée au pool de cartes compétitif (rejoint d'abord le hors-rotation, éligible à la rotation active au prochain patch majeur)" },
-  { key:'menu.patchnotes.item20', fr:"Map Editor : les biomes se ressemblaient encore trop entre eux au-delà de la densité — l'aperçu de l'éditeur ne piochait que dans 8 props génériques (troncs, fougères, champignons, buissons) recyclés à l'identique pour tous les biomes, et Désert/Ville futuriste n'avaient carrément AUCUN prop de détail (contrairement à ce que la partie jouée affichait déjà réellement, avec cactus/dunes en désert par exemple). Chaque biome pioche maintenant dans son propre lot d'éléments caractéristiques dans l'éditeur aussi : cactus et dunes en désert, mangroves/roseaux/algues en marécage, baobabs en savane, cristaux en ville futuriste, tournesols/fleurs en prairie, pics rocheux en montagne, etc. — l'aperçu de l'éditeur correspond enfin à ce qui s'affiche vraiment une fois la carte jouée" },
-  { key:'menu.patchnotes.item19', fr:"Map Editor : correction de deux problèmes qui rendaient TOUS les biomes trop vides, pas seulement Toundra/Ville. D'abord la vraie cause : l'anneau de décor s'étendait bien plus loin (jusqu'à 480m) que ce que le brouillard laisse voir (déjà quasi invisible au-delà de 250-300m), donc une bonne partie des éléments générés était en réalité gaspillée hors de vue — l'anneau est resserré à 300m et le nombre de bandes augmenté, ce qui concentre le même décor dans la zone réellement visible (environ 3 fois plus dense à l'œil). Ensuite un vrai bug de forme trouvé sur les arbres à feuillage large (tropical, prairie...) : leur couronne était étirée 70% plus haute que large, ce qui la faisait ressembler à un sapin pointu au lieu d'un feuillu rond même si le bon modèle était utilisé — proportions corrigées pour une couronne large et arrondie" },
-  { key:'menu.patchnotes.item18', fr:"Map Editor : le biome Toundra était de très loin le plus vide de tous les biomes — 50% du terrain restait nu contre 80-98% couverts pour les autres, et sans le moindre élément de glace/neige malgré le thème (juste des rochers/buissons génériques teintés en pâle). Densité remontée à 85%, avec deux nouveaux éléments propres au thème (blocs de glace, plaques de neige). Le biome Ville futuriste, également nettement plus vide que les autres (48%), gagne un peu de gravats/blocs de béton en plus des tours déjà présentes" },
-  { key:'menu.patchnotes.item17', fr:"Map Editor : le biome choisi pour une carte (Désert, Toundra, Forêt tropicale...) est enfin visible une fois la carte jouée — jusqu'ici, ce choix ne servait qu'à l'aperçu de l'éditeur et disparaissait totalement à l'export, le sol restant toujours le même vert générique en jeu quel que soit le biome sélectionné. Le sol constructible de l'éditeur (les cases sans tuile posée dessus, jusque-là toujours grises) prend maintenant la teinte du biome choisi, et la carte jouée reprend cette même couleur de sol sur toute son étendue, avec en plus un peu de décor cohérent (cactus en désert, sapins en taïga, glace en toundra...) parsemé autour de la zone de jeu pour qu'elle ne paraisse plus vide" },
-  { key:'menu.patchnotes.item16', fr:"Simulation 3D (Valostrike) : Time-Out tactique — dernière étape, la visualisation 3D du plan. Pendant le Time-Out, choisir un round de l'arbre affiche directement sur la carte les trajectoires calculées par le même pathfinding qui déplace réellement les agents (donc en suivant les vrais murs/couloirs, jamais une ligne arbitraire), avec une flèche animée par flanc (couleur différente pour un Split ou un Fake), un point lumineux qui parcourt le trajet pour matérialiser le timing, et des icônes d'utilitaire (fumée/flash/etc.) dérivées du vrai kit de l'équipe autour du site visé. Tout disparaît automatiquement à la fin du Time-Out. Le système de Time-Out est maintenant complet sur les 4 étapes prévues" },
-  { key:'menu.patchnotes.item15', fr:"Simulation 3D (Valostrike) : Time-Out tactique — ajout de l'Assistant Coach (3e étape). Un bouton dédié laisse l'IA recommander automatiquement une consigne à la place de la saisie manuelle, avec un % de confiance, un niveau de risque et 2-3 raisons concrètes (historique réel de réussite par stratégie, écart d'économie entre les deux équipes, site où la défense adverse a été la plus perméable récemment, série de défaites en cours) — aucune donnée inventée, uniquement des signaux déjà suivis par le vrai moteur de jeu" },
-  { key:'menu.patchnotes.item14', fr:"Simulation 3D (Valostrike) : le Time-Out tactique (2e étape) permet maintenant de taper une consigne pendant la pause (Fast B, Split A, Eco, Force Buy, Mid Control, Retake Setup...) — plus de 25 mots-clés reconnus. Un arbre de décision sur 3 rounds se génère automatiquement, avec une branche Victoire et une branche Défaite à chaque round, jusqu'à 4 scénarios possibles au round 3. Chaque round de l'arbre propose une stratégie, un objectif, un achat recommandé et les utilitaires disponibles dans le vrai roster — l'économie projetée round par round utilise les mêmes formules que le vrai jeu (prime de victoire/défaite), donc l'arbre ne recommande jamais un achat que l'équipe ne pourrait pas réellement se payer. Quand c'est l'IA adverse qui appelle le Time-Out, elle génère aussi son propre plan (affiché en lecture seule)" },
-  { key:'menu.patchnotes.item13', fr:"Simulation 3D (Valostrike) : ajout du Time-Out tactique façon compétitif pro (1re étape). Chaque équipe dispose d'1 Time-Out par side (jamais récupéré une fois pris) + 1 unique pour toute l'overtime. Bouton dédié pour le déclencher (toujours à la coupure entre deux rounds, jamais en plein combat) ; l'IA adverse peut aussi en demander un elle-même après une série de défaites. Popup d'annonce avec équipe/score/side/compte à rebours réel de 30s, pulsation lumineuse colorée au spawn de l'équipe dans la vue 3D, carte dédiée dans le fil d'événements, compteur permanent sous le bandeau de score (bascule automatiquement en compteur d'overtime à partir du round 25), et historique consultable de tous les Time-Outs du match. Le contenu tactique (consignes, plan sur 3 rounds, recommandations IA, visualisation 3D du plan) arrive dans une prochaine mise à jour" },
-  { key:'menu.patchnotes.item12', fr:"Simulation 3D (Valostrike) : la barrière de spawn (murs bleus, 10s en début de round) figeait totalement les deux équipes — elles peuvent désormais se déplacer normalement pour se mettre en place, juste sans pouvoir dépasser le mur avant qu'il ne tombe, comme en vrai. Correction au passage d'un bug plus profond découvert en la construisant : la position d'un agent en déplacement suit un compteur de progression interne qui continuait d'avancer même quand l'agent était visuellement bloqué au mur — sans le correctif, tout le monde aurait littéralement téléporté à sa position réelle (10s de marche non bridée) dès la chute de la barrière" },
-  { key:'menu.patchnotes.item11', fr:"Simulation 3D (Valostrike) : ajout de la barrière de spawn, comme en vrai — au début de chaque round, un mur bleu translucide immobilise chaque équipe 10 secondes à son point de spawn avant que qui que ce soit ne puisse bouger. Jusqu'ici les défenseurs partaient prendre leurs positions/angles instantanément dès le spawn, avant même le vrai début du round (signalé par un joueur). Mode réalisateur : corrigé le temps d'activation trop long — la caméra restait totalement figée tant qu'aucun duel n'était en cours (ex. juste après activation, ou pendant la barrière de spawn) ; elle affiche maintenant tout de suite un plan d'ensemble et bascule sur le premier duel dès qu'il démarre" },
-  { key:'menu.patchnotes.item10', fr:"Simulation de carte sans moteur 3D (Valostrike) : le fil du round affiche désormais une phrase de situation quand la manche se termine sur un clutch (ex. « Clutch 1v2 pour la défense — manche remportée en désamorçant malgré le désavantage numérique »), calculée à partir des vrais kills du round plutôt qu'un simple badge « 1v2 » sans suite logique. Corrigé au passage : les buy-types (Force/Semi/Full/Hyper Buy) pouvaient être choisis même sans avoir de quoi les payer réellement (ex. Force Buy dès 4000 NX pour un achat qui coûte 4200), ce qui vidait le compte au round suivant et rendait deux économies très proches (4100 vs 4200 NX) visiblement incohérentes ; Save coûtait 500 NX au lieu de 0 (économiser ne devrait jamais rien coûter)" },
-  { key:'menu.patchnotes.item0z', fr:"Correction d'un vrai bug d'économie NX en simulation 3D (Valostrike) : le changement de côté à la mi-match (round 13) ne remettait jamais les crédits à zéro ni ne retirait les armes déjà achetées — l'équipe qui avait dominé la 1re mi-temps abordait donc la 2e avec son stock de crédits ET son arme encore en poche, ce qui supprimait purement et simplement le round pistolet de la 2e mi-temps et déséquilibrait toute la suite du match. Les deux équipes repartent maintenant à 800 NX et au pistolet de base au round 13, comme au vrai round 1" },
-  { key:'menu.patchnotes.item0y', fr:"Optimisation FPS de la simulation 3D (Valostrike) : la carte Zenith s'est révélée composée de plus de 13 000 mailles rien que pour son sol (dallage détaillé en centaines de petites tuiles), dont près de 7000 recalculaient inutilement leur ombre portée à chaque frame — un carrelage posé à plat n'a jamais d'ombre visible à projeter. Ces tuiles de sol, ainsi que les plus petits détails procéduraux (boulons, coutures...) trop fins pour qu'une ombre s'y voie, ne projettent plus d'ombre du tout ; qualité d'ombre légèrement allégée (toujours nette, juste moins coûteuse à recalculer en continu) ; calcul de ligne de vue de l'IA (déjà appelé plusieurs dizaines de fois par frame en plein duel) allégé pour ne plus réallouer de mémoire à chaque appel" },
-  { key:'menu.patchnotes.item0x', fr:"Correction d'un bug empêchant la vue subjective de fonctionner en jeu réel : les cartes de joueurs du HUD (Zenith et Outpost) étaient en réalité inertes au clic — la souris traversait la carte et cliquait la scène 3D en dessous — alors que mes propres tests précédents, faits par appel de code plutôt qu'un vrai clic souris, ne l'avaient pas révélé. Cliquer un joueur dans le HUD bascule maintenant bien la caméra en vue subjective" },
-  { key:'menu.patchnotes.item0w', fr:"Simulation 3D (Valostrike) : nouvelle vue subjective. Cliquer un joueur dans le HUD bascule la caméra à hauteur de ses yeux, orientée dans sa direction de visée réelle, au lieu de rester sur la vue spectateur libre — un second clic sur le même joueur (ou Échap) quitte le mode. Si le joueur suivi meurt, la caméra bascule automatiquement sur son allié vivant le plus proche au lieu de rester braquée sur un corps immobile ; s'il ne reste plus aucun allié vivant, retour à la vue libre. Toute manipulation manuelle de la caméra (glisser/molette) quitte aussi le mode subjectif" },
-  { key:'menu.patchnotes.item0v', fr:"Simulation 3D (Valostrike) : le tag d'équipe s'affiche enfin devant le pseudo au-dessus des personnages (ex. « JL Kreta » pour l'organisation JL) — la donnée existait déjà côté manager mais n'était jamais lue par l'étiquette flottante en jeu. Look opérateur tactique repris de la tête aux pieds (référence type CS), corps compris cette fois : torse/bras/gilet/pochettes/sac à dos/jambes passent en tons ternes gris-olive-tan au lieu du rouge/vert vif sur toute la tenue — la couleur d'équipe reste lisible via l'anneau au sol, la visière et un nouveau petit brassard sur le bras plutôt que de teindre tout le corps. Tête entièrement cagoulée (plus de peau/cheveux visibles) avec visière/lunettes de protection, mains repositionnées pour tenir réellement l'arme" },
-  { key:'menu.patchnotes.item0u', fr:"Simulation 3D (Valostrike) : personnages retravaillés, plus détaillés et plus crédibles anatomiquement. Cou ajouté entre tête et torse (avant : sphère posée à cru sur un cylindre), mains, bottes, ceinture + pochettes tactiques, sac à dos, mâchoire, tête légèrement aplatie plutôt qu'une sphère parfaite. Correction du pivot des jambes : la marche faisait tourner toute la jambe sur son propre centre au lieu de l'articuler depuis la hanche — les bottes suivent maintenant naturellement le mouvement. Arme reconstruite en plusieurs pièces (corps/chargeur/crosse/poignée avant/canon selon le palier d'achat réel) au lieu d'une seule boîte plate. Environ 24 éléments par personnage contre 13 avant, dans les deux fichiers de simulation (Zenith et Outpost)" },
-  { key:'menu.patchnotes.item0t', fr:"Map Editor : refonte du réalisme des arbres, moteur commun à toute la famille Arbres. Tous les troncs (sauf Bambou/Baobab, traités à part) ont désormais un évasement des racines au pied — un tronc parfaitement cylindrique du sol au sommet était le signal \"forme géométrique\" le plus flagrant. Chaque arbre a en plus un léger dévers naturel, plus aucun n'est parfaitement vertical. Sapin/Pin : 4 étages de branches dégressifs et texturés différemment au lieu de 2 gros cônes identiques. Saule pleureur : frondaison éclatée en plusieurs touffes + 16 lianes tombantes (contre 10, toutes identiques avant). Baobab : tronc massif et renflé qui lui est propre, plus le même tronc fin générique que tous les autres arbres — c'est justement ce tronc démesuré qui définit un baobab. Palmier : palmes en 2 segments qui s'affaissent sous leur poids au lieu d'une planche bien droite, plus des noix de coco" },
-  { key:'menu.patchnotes.item0s', fr:"Map Editor : audit complet de fin de passe détail. Cactus (épines + fleurs) et tas de neige (éclats de glace) enrichis. Le reste de la bibliothèque a été vérifié un par un : les grosses structures (Bâtiment, Tour, Entrepôt, Usine, Bureau...) étaient déjà très détaillées (jusqu'à 220 éléments), et les petits props/éléments d'eau restants (drapeau, pot de fleurs, nénuphar, mare...) sont déjà au bon niveau pour ce qu'ils représentent — pas de sur-détail ajouté juste pour ajouter" },
-  { key:'menu.patchnotes.item0r', fr:"Map Editor : encore une salve de détail — décors, props et éléments de verticalité cette fois. Bloc de béton, tonneau (cerclages + couvercle), caisse (cornières), roue cassée (moyeu + rayons), tapis (bordure + médaillon central) : tous n'étaient qu'une seule forme nue. Rampe verticale et rampe d'accès : bandes antidérapantes + garde-corps, comme la rampe de parking. Ascenseur : jusque-là une simple dalle plate, gagne montants, garde-corps et boîtier de commande" },
-  { key:'menu.patchnotes.item0q', fr:"Map Editor : suite de la passe détail, sur Nature et Structures cette fois. Les arbres à frondaison ronde (Chêne, Bouleau, Cerisier, Érable — jusque-là un seul cône lisse, tous identiques) ont maintenant une silhouette de feuillage cassée en plusieurs touffes de teintes légèrement différentes au lieu d'une boule parfaite. Les maisons (les 9 de la famille « Maisons régionales », dont Bois/Pierre/Chalet/Hutte/Cabane...) n'étaient que 3 boîtes (murs/toit/porte) — elles ont désormais fenêtres, cheminée et marche d'entrée. Tronc tombé, rocher isolé et grand rocher enrichis (mousse, galets épars, anneau de coupe). Rampe, Pyramide et Tente — jusqu'ici une seule forme géométrique nue chacune — ont gagné bandes antidérapantes et garde-corps, pierre de faîte et entrée basse, et rabat d'entrée avec haubans/piquets" },
-  { key:'menu.patchnotes.item0p', fr:"Map Editor : correction d'un vrai bug de géométrie touchant près de 30 assets (bambou, murs modulaires — dont toutes les pièces d'angle —, plusieurs murs à thème, les 4 nouveaux éléments de couverture, station-service, silo, fort, mine, serre, abri bus, herbe haute, roseau, liane, mangrove...) : de nombreux objets étaient posés à moitié enterrés dans le sol à cause d'un mauvais calcul de hauteur, ce qui les faisait paraître chétifs, tordus ou juste \"moches\" une fois en carte. Le bambou en particulier était méconnaissable : cannes filiformes à moitié invisibles sous terre. Cannes de bambou repensées : bien plus épaisses, noeuds annelés (le vrai trait distinctif du bambou, absent avant), léger dévers naturel par canne, feuillage en touffes plutôt qu'un seul cône plein. Nouveau système de détail réutilisable (éclats, fissures, coulures/taches, boulons) appliqué aux murs les plus nus (Brique, Bois, Marbre, Granit, Rouillé, Temple) ; le mur Obsidienne, jusque-là totalement vide, reçoit désormais des veines cristallines lumineuses et des éclats de verre volcanique en relief" },
-  { key:'menu.patchnotes.item0o', fr:"Map Editor : passe rangement/réalisme + habillage aligné sur le jeu. Palette d'assets réorganisée : les 3 grosses catégories (Murs 65, Nature 66, Structures 67) sont maintenant regroupées par familles thématiques (Modulaire, Historique, Industriel, Arbres, Points d'eau...) au lieu d'une seule grille plate de 60-70 tuiles à faire défiler. Recherche d'assets corrigée : chercher une variante modulaire (ex. « porte ») retrouve désormais toutes les portes, sous-catégorie automatiquement dépliée. Nouveau panneau « Objets de la carte » (toujours visible dans l'inspecteur) qui liste tous les objets placés groupés par catégorie, cliquables pour sélectionner (Maj/Ctrl+clic pour ajouter/retirer), surlignage synchronisé dans les deux sens avec le viewport. Libellés dupliqués de la nature différenciés (Buisson dense/clairsemé, Fougère haute/basse, Arbre mort noueux/décharné). L'éditeur reprend maintenant les couleurs et la typographie du jeu (charbon + doré, polices Manrope/Fraunces) au lieu de son ancien thème bleu/cyan. Toutes les textures procédurales (pierre, brique, béton, bois, sol...) passent de 256×256 à 512×512, plus fines de près. Légère variation de teinte par exemplaire posé sur les murs/décors sans détail de surface dédié, pour casser l'effet couleur plate identique partout" },
-  { key:'menu.patchnotes.item0n', fr:"Map Editor amélioré : bouton « Tester en match » qui ouvre directement votre carte en cours dans un vrai match 3D (plus besoin de copier-coller le JSON à la main), bouton « Vérifier pour Valostrike » qui contrôle la présence des sites/spawns et d'assez de sol avant de jouer. Édition multi-sélection enfin fonctionnelle (déplacer/tourner/redimensionner plusieurs objets à la fois les décalait tous sur le premier objet sélectionné). Grille au sol visible selon le pas d'accrochage choisi, retour visuel sur annuler/rétablir, compteur d'objets par catégorie, lumière de remplissage qui adoucit les ombres dures. 13 nouveaux décors (couvertures, verticalité, éléments tactiques)" },
-  { key:'menu.patchnotes.item0m', fr:"Cartes 3D et personnages Valostrike : la bibliothèque de décors du Map Editor (284 assets, murs/structures/nature très détaillés) est désormais PARTAGÉE avec le moteur de match 3D — Zenith et Outpost gagnent d'un coup tout ce niveau de détail (fini les murs/props réduits à de simples boîtes grises), et toute nouvelle carte construite dans l'éditeur s'affichera pareil en vrai match. Côté personnages : jambes qui animent en marchant, recul visible à chaque tir, mort qui bascule et s'estompe au lieu de disparaître instantanément, barre de vie et pastille d'armure flottantes au-dessus de chaque agent, silhouette d'arme qui suit le vrai palier d'achat, accent de couleur par rôle (Duelliste/Initiateur/Contrôleur/Sentinelle/Flex)" },
-  { key:'menu.patchnotes.item0l', fr:"Nouveaux leviers stratégiques Valostrike, propres au FPS tactique : doctrine économique (force-buy vs save discipliné, agit vraiment sur les achats NX), agressivité d'entrée de site (rush vs exécutions travaillées, agit vraiment sur les choix de round de l'IA), discipline de rotation/retake — les 3 avec un effet réel en match, pas une force brute générique. La synergie de composition d'agents (déjà affichée sur la tier list) compte enfin dans la vraie force d'équipe, pour vous comme pour vos adversaires. Un bouton dédié laisse le Head Coach gérer ces doctrines à votre place" },
-  { key:'menu.patchnotes.item0k', fr:"Refonte complète de la stratégie Rocket Champ : le style unique emprunté à Valostrike est remplacé par 3 axes tactiques propres (Tempo, Discipline de boost, Approche mécanique), chacun avec un vrai effet en match — mais seulement si votre effectif a le profil d'attributs pour le soutenir. Rôles dynamiques (1er/2e/3e homme), maîtrise de terrain et box-score réel (buts/passes/arrêts par joueur) sont désormais pris en compte pour TOUS les matchs de ligue, plus une préparation par adversaire, un ajustement automatique de tempo en cas de retard dans une série, et un bouton pour laisser le Head Coach gérer entièrement cette préparation tactique" },
-  { key:'menu.patchnotes.item0j', fr:"Récap de match Valostrike (cartes simulées en 3D) refait pour refléter le vrai match joué : dégâts, HS%, KAST%, premiers kills/morts et clutchs sont désormais calculés à partir de ce qui s'est réellement passé sur la carte (le moteur 3D suit maintenant chaque dégât/tir/assist round par round) au lieu d'être estimés depuis les seuls attributs des joueurs — les assists, jusque-là toujours à 0, sont eux aussi vraiment comptabilisés" },
-  { key:'menu.patchnotes.item0i', fr:"Correction d'un bug de stratégie Rocket Champ : un match RLCS (Opens/Majors/LCQ/Worlds) impliquant votre équipe ignorait totalement le style choisi dans « Formation & identité tactique » (et utilisait un calcul de force très simplifié) — aligné sur le même moteur que le reste de la ligue" },
-  { key:'menu.patchnotes.item0h', fr:"Niveau de départ refait en 5 scénarios à identité propre (Streamer qui se lance, Repreneur d'un club, Startup ambitieuse, Structure sponsorisée, Personnalisé) au lieu de 4 paliers étoilés — chacun avec son propre équilibre budget/réputation/supporters (la Structure sponsorisée démarre avec un vrai sponsor déjà signé), le Personnalisé remplace le Mode Réaliste et laisse tout régler à la main via des curseurs" },
-  { key:'menu.patchnotes.item0g', fr:"Nouveau système de blason : la Forge d'Identité (génération par mots-clés d'ambiance, 3 calques forme/emblème/accent réglables à la main, aperçu qui morphe en direct) remplace le badge texte-couleur, sur l'écran de création et partout où l'organisation s'affiche" },
-  { key:'menu.patchnotes.item0f', fr:"Ratings Valostrike/Valostrike GC recalibrés sur l'échelle réelle de VLR.gg : une performance moyenne notait ~0.58 au lieu de ~1.00, toutes les notes du jeu paraissaient anormalement basses" },
-  { key:'menu.patchnotes.item0e', fr:"Correction d'un bug de calendrier Valostrike GC : le Stage 3 (juillet-août) pouvait démarrer n'importe quand dans l'année sur une section rejointe après coup, provoquant des matchs hors saison (ex. en décembre)" },
-  { key:'menu.patchnotes.item0d', fr:"Correction d'un bug critique du moteur 3D (cartes Zenith/Outpost) : « Passer le round » et « Simuler le match » ne faisaient plus avancer le temps de manche, qui tournait dans le vide sans jamais conclure" },
-  { key:'menu.patchnotes.item0c', fr:"Score correctement centré dans le popup de match Rocket Champ en direct, quelle que soit la longueur des noms d'équipe" },
-  { key:'menu.patchnotes.item0b', fr:"Écran de création : cases de sélection du jeu resserrées, alignées proprement en 2 par 2" },
-  { key:'menu.patchnotes.item0a', fr:"Correction d'un bug de navigation : avancer d'un jour depuis une section ouverte via le sélecteur de la barre latérale ne vous renvoie plus dans une autre section" },
-  { key:'menu.patchnotes.item1', fr:"Nouveau système de stratégie pour Rocket Champ : style d'équipe manuel (effet réel sur les matchs) et priorisation d'un attribut à l'entraînement" },
-  { key:'menu.patchnotes.item2', fr:"Correction d'un bug d'affichage du sélecteur de section dans la barre latérale (menu tronqué/mal positionné)" },
-  { key:'menu.patchnotes.item3', fr:"Ranked Valostrike rendu cohérent : le haut du ladder est maintenant dominé par de vrais pros signés en équipe VST International, plus par des agents libres au hasard" },
-  { key:'menu.patchnotes.item4', fr:"Système de capitaine pour Rocket Champ : à désigner depuis la fiche d'un joueur, avec note de leadership et bonus d'équipe" },
-  { key:'menu.patchnotes.item5', fr:"Mail : boîte de réception fusionnée entre toutes les sections actives, avec filtres par section, catégorie et priorité" },
-  { key:'menu.patchnotes.item6', fr:"Lecteur de musique : barre d'avancement de la piste (avec temps écoulé/restant) et curseur de volume dédié, en plus du bouton muet" },
-  { key:'menu.patchnotes.item7', fr:"Notes de mise à jour : la carte du menu principal ouvre désormais un popup avec le patch complet" },
-  { key:'menu.patchnotes.item8', fr:"Suppression complète du système de logo/blason de l'organisation (création et affichage), remplacé par un badge de couleur avec le tag du club" },
-  ] },
-];
-// Notes de la version EN COURS (PATCH_NOTES_HISTORY[0]) — c'est ici que
-// chaque tâche accomplie ajoute son entrée tant que la version en tête de
-// PATCH_NOTES_HISTORY n'a pas changé.
-const CURRENT_PATCH_NOTES = PATCH_NOTES_HISTORY[0].notes;
-const PATCHNOTES_WIDGET_PREVIEW_COUNT = 4;
-// li sans puce (voir .mainmenu-patchnotes-list li.mainmenu-patchnotes-empty
-// dans style.css) pour la version en cours quand elle n'a encore aucune
-// note (ex. juste après un changement de version) — jamais de liste vide
-// silencieuse, qui donnerait l'impression d'un widget cassé.
-function patchNotesEmptyLi(){
-  return `<li class="mainmenu-patchnotes-empty">${T('menu.patchnotes.empty',"Rien à signaler pour l'instant sur cette version.")}</li>`;
-}
-// Carte compacte du menu principal : un extrait des tâches les plus
-// récentes de la version EN COURS (voir CURRENT_PATCH_NOTES), le reste
-// n'apparaissant que dans le popup complet pour ne pas faire grandir
-// indéfiniment la carte flottante.
-function renderPatchnotesWidget(){
-  const list = document.querySelector('.mainmenu-patchnotes-list');
-  if(!list) return;
-  list.innerHTML = CURRENT_PATCH_NOTES.length
-    ? CURRENT_PATCH_NOTES.slice(0, PATCHNOTES_WIDGET_PREVIEW_COUNT).map(n=>`<li>${T(n.key, n.fr)}</li>`).join('')
-    : patchNotesEmptyLi();
-  applyI18n();
-}
-// Popup agrandi : navigable entre TOUTES les versions de PATCH_NOTES_HISTORY
-// (flèches précédent/suivant de part et d'autre du badge de version), pas
-// figé sur la version en cours — voir patchNotesModalVersionIndex.
-let patchNotesModalVersionIndex = 0;
-function renderPatchNotesModalVersion(){
-  const entry = PATCH_NOTES_HISTORY[patchNotesModalVersionIndex];
-  document.getElementById('patchNotesModalVersion').textContent = entry.version;
-  document.getElementById('patchNotesModalList').innerHTML = entry.notes.length
-    ? entry.notes.map(n=>`<li>${T(n.key, n.fr)}</li>`).join('')
-    : patchNotesEmptyLi();
-  applyI18n();
-  const olderBtn = document.getElementById('patchNotesModalOlder');
-  const newerBtn = document.getElementById('patchNotesModalNewer');
-  if(olderBtn) olderBtn.disabled = patchNotesModalVersionIndex >= PATCH_NOTES_HISTORY.length-1;
-  if(newerBtn) newerBtn.disabled = patchNotesModalVersionIndex <= 0;
-}
-function openPatchNotesModal(){
-  patchNotesModalVersionIndex = 0; // toujours rouvrir sur la version en cours
-  renderPatchNotesModalVersion();
-  document.getElementById('patchNotesModalOverlay').style.display = 'flex';
-}
-function closePatchNotesModal(){
-  document.getElementById('patchNotesModalOverlay').style.display = 'none';
-}
+// Historique COMPLET des patchs : déplacé dans patch-notes.js (module
+// dédié), qui définit PATCH_NOTES_HISTORY, CURRENT_PATCH_NOTES et toutes les
+// fonctions de rendu associées (renderPatchnotesWidget, openPatchNotesModal,
+// closePatchNotesModal, renderPatchNotesModalVersion, patchNotesModalVersionIndex).
+// Ne pas redéclarer ces identifiants ici : patch-notes.js est chargé avant
+// script.js (voir index.html), une redéclaration ferait planter TOUT script.js
+// au chargement (SyntaxError sur les "const" dupliqués).
 
 /* ---------------------------------------------------------
    4bis. OPTIONS, audio, graphismes, interface, langue,
@@ -11121,11 +11342,11 @@ function setDevModeUnlocked(v){
 let devModeUnlocked = isDevModeUnlocked();
 
 const OPTIONS_LANGUAGES = [
-  { code:'fr', label:'Français',   flag:'fr' },
-  { code:'en', label:'English',    flag:'gb' },
-  { code:'de', label:'Deutsch',    flag:'de' },
-  { code:'es', label:'Español',    flag:'es' },
-  { code:'pt', label:'Português',  flag:'pt' },
+  { code:'fr', label:'Français',   flag:'fr', available:true },
+  { code:'en', label:'English',    flag:'gb', available:true },
+  { code:'de', label:'Deutsch',    flag:'de', available:false },
+  { code:'es', label:'Español',    flag:'es', available:false },
+  { code:'pt', label:'Português',  flag:'pt', available:false },
 ];
 
 function defaultSettings(){
@@ -11140,7 +11361,7 @@ function defaultSettings(){
     graphics: { displayMode:'windowed', fpsLimit:60, vsync:true, quality:'eleve', brightness:50, contrast:50 },
     interface: { mouseSensitivity:100, tooltips:true, notifications:true, animations:true, confirmDestructive:true },
     language: 'fr',
-    accessibility: { colorblind:'none', highContrast:false, reduceEffects:false, reduceMotion:false, customTextSize:100 },
+    accessibility: { colorblind:'none', highContrast:false, reduceEffects:false, reduceMotion:false },
     system: { autosave:true, autosaveInterval:5 },
   };
 }
@@ -11276,20 +11497,53 @@ document.addEventListener('click', (e)=>{ if(e.target.closest('button')) sfxClic
 // Applique réellement les réglages à l'interface : échelle, luminosité,
 // contraste, réduction des animations/effets, contraste élevé, filtres
 // d'assistance daltonisme, notifications, volume, sauvegarde automatique.
+function applyGraphicsCompatibility(s){
+  const body = document.body || document.documentElement;
+  const quality = s.graphics && s.graphics.quality ? s.graphics.quality : 'eleve';
+  const brightness = 0.6 + ((Number(s.graphics && s.graphics.brightness) || 50) / 100) * 0.8;
+  const contrast = 0.6 + ((Number(s.graphics && s.graphics.contrast) || 50) / 100) * 0.8;
+  const fpsLimit = s.graphics && s.graphics.fpsLimit === 'unlimited' ? 0 : (Number(s.graphics && s.graphics.fpsLimit) || 60);
+  const vsync = !!(s.graphics && s.graphics.vsync);
+
+  document.documentElement.style.setProperty('--content-filter', `brightness(${brightness.toFixed(2)}) contrast(${contrast.toFixed(2)})`);
+  document.documentElement.style.setProperty('--fps-limit', fpsLimit > 0 ? String(fpsLimit) : '0');
+  document.documentElement.dataset.graphicsQuality = quality;
+  document.documentElement.dataset.vsync = String(vsync);
+
+  body.classList.remove('quality-faible', 'quality-moyen', 'quality-eleve', 'quality-ultra');
+  body.classList.add(`quality-${quality}`);
+  body.classList.toggle('vsync-off', !vsync);
+  body.classList.toggle('quality-low', quality === 'faible');
+  body.classList.toggle('quality-medium', quality === 'moyen');
+  body.classList.toggle('quality-high', quality === 'eleve' || quality === 'ultra');
+
+  window.ESD_GRAPHICS = {
+    quality,
+    fpsLimit,
+    vsync,
+    brightness: Number((brightness).toFixed(2)),
+    contrast: Number((contrast).toFixed(2)),
+    isLowQuality: quality === 'faible',
+    isMediumQuality: quality === 'moyen',
+    isHighQuality: quality === 'eleve' || quality === 'ultra'
+  };
+
+  // Le navigateur ne peut pas réellement synchroniser le rendu à l'écran
+  // comme un moteur natif, mais on adapte le jeu en réduisant les effets
+  // visuels et en exposant une limite d'images par seconde de manière
+  // exploitable par le reste de l'application.
+  if(typeof window !== 'undefined'){
+    window.__ESD_FRAME_LIMIT__ = fpsLimit > 0 ? fpsLimit : null;
+  }
+}
+
 function applySettings(s){
   const body = document.body;
-  const effectiveUiScale = s.accessibility.customTextSize/100;
-  body.style.zoom = effectiveUiScale.toFixed(3);
+  // L'ancien curseur "Taille du texte" (accessibility.customTextSize) posait
+  // body.style.zoom, ce qui décale les éléments en position:fixed — retiré
+  // sur demande explicite, sans remplacement automatique.
 
-  const brightness = 0.6 + (s.graphics.brightness/100) * 0.8;   // 0.6 → 1.4
-  const contrast   = 0.6 + (s.graphics.contrast/100) * 0.8;     // 0.6 → 1.4
-  // Important : ne JAMAIS appliquer ce filtre sur <body> (ni sur aucun
-  // ancêtre de .sidebar) — un filter CSS crée un nouveau bloc de
-  // confinement pour les descendants en position:fixed, ce qui casse le
-  // menu latéral fixe (il se met alors à défiler avec la page). On
-  // l'applique donc via une variable CSS consommée uniquement par les
-  // conteneurs de contenu, qui sont des frères du sidebar, jamais ses ancêtres.
-  document.documentElement.style.setProperty('--content-filter', `brightness(${brightness.toFixed(2)}) contrast(${contrast.toFixed(2)})`);
+  applyGraphicsCompatibility(s);
 
   body.classList.toggle('reduce-motion', s.accessibility.reduceMotion || !s.interface.animations || s.graphics.quality==='faible');
   body.classList.toggle('reduce-effects', s.accessibility.reduceEffects || s.graphics.quality==='faible');
@@ -11403,7 +11657,7 @@ function renderLanguageTab(){
     <div class="opt-section-sub">${T('options.language.sub',"Le chrome de l'interface (menus, écrans, options) d'Esports Director est disponible en français et en anglais ; le contenu de simulation (mails, commentaires de match...) reste en français pour l'instant. Les autres langues sont enregistrées pour une prochaine mise à jour de traduction.")}</div>
     <div class="opt-lang-grid">
       ${OPTIONS_LANGUAGES.map(l=>`
-        <button class="opt-lang-option ${l.code===current?'active':''}" data-lang="${l.code}">
+        <button class="opt-lang-option ${l.code===current?'active':''} ${l.available?'':'disabled'}" data-lang="${l.code}" ${l.available ? '' : 'disabled'} aria-disabled="${l.available ? 'false' : 'true'}">
           ${flagImgByIso(l.flag, 26, l.label)}
           <span>${l.label}</span>
         </button>
@@ -11423,7 +11677,19 @@ function renderAccessibilityTab(){
     ${optRow(T('options.accessibility.highContrast','Contraste élevé'), T('options.accessibility.highContrast.desc','Renforce les bordures et séparations'), optToggle('optHighContrast', a.highContrast))}
     ${optRow(T('options.accessibility.reduceEffects','Réduction des effets visuels'), T('options.accessibility.reduceEffects.desc','Masque les halos lumineux et particules décoratives'), optToggle('optReduceEffects', a.reduceEffects))}
     ${optRow(T('options.accessibility.reduceMotion','Réduction des animations'), T('options.accessibility.reduceMotion.desc','Désactive transitions et animations'), optToggle('optReduceMotion', a.reduceMotion))}
-    ${optRow(T('options.accessibility.textSize','Taille du texte personnalisable'), T('options.accessibility.textSize.desc','Ajuste la taille du texte de toute l\'interface'), optSlider('optCustomTextSize', a.customTextSize, 70, 160))}
+  `;
+}
+
+function renderSaveTab(){
+  const s = pendingSettings.system;
+  return `
+    <div class="opt-section-title"><i class="fa-solid fa-floppy-disk"></i> ${T('options.save.title','Sauvegarde')}</div>
+    <div class="opt-section-sub">${T('options.save.sub','Gérez la sauvegarde de votre partie et revenez au menu ou quittez proprement le jeu.')}</div>
+    ${optRow(T('options.system.autosave','Sauvegarde automatique'), '', optToggle('optAutosave', s.autosave))}
+    ${optRow(T('options.system.autosaveInterval','Intervalle d\'autosauvegarde'), '', optPillGroup('autosaveInterval', [
+      {value:'2', label:'2 min'}, {value:'5', label:'5 min'}, {value:'10', label:'10 min'}, {value:'15', label:'15 min'},
+    ], String(s.autosaveInterval)))}
+    ${optRow(T('options.save.manage','Sauvegardes'), T('options.save.manage.desc','Créez une nouvelle sauvegarde, ou chargez/renommez/supprimez une sauvegarde existante — plusieurs versions de la même carrière peuvent coexister'), `<button class="btn btn-sm" id="btnOpenSaveBrowser"><i class="fa-solid fa-floppy-disk"></i> ${T('options.save.manage.button','Sauvegarder')}</button>`)}
   `;
 }
 
@@ -11505,6 +11771,90 @@ function cheatGenerateSquadAndStaff(){
   }
   renderOptionsPanel();
 }
+
+function devAddMoney(amount){
+  if(!state || !state.org) return false;
+  const value = Number(amount) || 0;
+  if(!Number.isFinite(value)) return false;
+  state.budget = (Number(state.budget) || 0) + value;
+  recordTransaction('org', 'other', 'Ajustement manuel du budget (dev)', value);
+  pushNotification(`Ajustement manuel du budget : ${value>0?'+':''}${formatMoney(value)}.`);
+  saveState();
+  renderTopbar();
+  return true;
+}
+
+function devSetReputation(value){
+  if(!state || !state.org) return false;
+  const parsed = Number(value);
+  if(!Number.isFinite(parsed)) return false;
+  state.reputation = Math.max(0, Math.min(100, Math.round(parsed*1000)/1000));
+  pushNotification(`Réputation définie manuellement : ${formatReputation(state.reputation)} / 100.`);
+  saveState();
+  renderTopbar();
+  return true;
+}
+
+function devUnlockAllSections(){
+  if(!state || !state.org) return false;
+  Object.keys(GAMES).forEach(gameId=>{
+    if(!state.sections.includes(gameId)) state.sections.push(gameId);
+  });
+  ensureInfrastructure();
+  ensureSectionContainers();
+  if(!state.squads) state.squads = {};
+  Object.keys(GAMES).forEach(gameId=>{
+    state.squads[gameId] = state.squads[gameId] || [];
+    const allowedRoles = GAMES[gameId].roles || [];
+    allowedRoles.forEach(role=>{
+      if(!state.squads[gameId].some(p=>p.role===role)){
+        state.squads[gameId].push({ ...genPlayer(gameId, role), ...contractFieldsForNewSignature(2) });
+      }
+    });
+  });
+  saveState();
+  renderTopbar();
+  return true;
+}
+
+function devAdvanceMonth(months=1){
+  if(!state || !state.org) return false;
+  const delta = Math.max(0, Number(months) || 1);
+  for(let i=0;i<delta;i++){
+    state.date.month += 1;
+    if(state.date.month > 12){
+      state.date.month = 1;
+      state.date.year += 1;
+    }
+  }
+  saveState();
+  renderTopbar();
+  return true;
+}
+
+function devResetForfeit(){
+  if(state && state.vct){ state.vct.forfeit = false; }
+  saveState();
+  renderTopbar();
+  return true;
+}
+
+const ESD_DEV = {
+  addMoney: (amount)=>{ const ok = devAddMoney(amount); if(ok) toast(`Budget mis à jour : ${formatMoney(state.budget)}.`, 'success'); return ok; },
+  setBudget: (amount)=>{ const ok = devAddMoney(amount - (Number(state.budget) || 0)); if(ok) toast(`Budget défini à ${formatMoney(state.budget)}.`, 'success'); return ok; },
+  addReputation: (amount)=>{ const value = Number(amount) || 0; const prev = Number(state.reputation) || 0; devSetReputation(prev + value); toast(`Réputation mise à jour : ${formatReputation(state.reputation)} / 100.`, 'success'); return true; },
+  setReputation: (value)=>{ const ok = devSetReputation(value); if(ok) toast(`Réputation mise à jour : ${formatReputation(state.reputation)} / 100.`, 'success'); return ok; },
+  generateSquadAndStaff: ()=>{ cheatGenerateSquadAndStaff(); return true; },
+  unlockAllSections: ()=>{ const ok=devUnlockAllSections(); if(ok) toast('Toutes les sections et leurs rôles ont été débloqués.', 'success'); return ok; },
+  advanceMonth: (months=1)=>{ const ok=devAdvanceMonth(months); if(ok) toast(`Date avancée de ${months} mois.`, 'success'); return ok; },
+  resetForfeit: ()=>{ const ok = devResetForfeit(); if(ok) toast('Forfait levé.', 'success'); return ok; },
+  logState: ()=>{ console.log(state); return state; },
+};
+if(typeof window !== 'undefined'){
+  window.ESD_DEV = ESD_DEV;
+  window.cheat = ESD_DEV;
+}
+
 function renderCheatTab(){
   if(!devModeUnlocked){
     return `
@@ -11531,6 +11881,10 @@ function renderCheatTab(){
       <button class="btn btn-sm" id="btnCheatAddRep"><i class="fa-solid fa-star"></i> ${T('options.dev.reputation.add','Ajouter')}</button>
       <button class="btn btn-sm" id="btnCheatSetRep"><i class="fa-solid fa-pen"></i> ${T('options.dev.reputation.set','Définir')}</button>
     `)}
+    ${optRow(T('options.dev.quick','Outils rapides'), T('options.dev.quick.desc','Actions de dépannage, génération et progression accélérée pour tester des scénarios de jeu.'), `
+      <button class="btn btn-sm" id="btnCheatUnlockAllSections"><i class="fa-solid fa-unlock-keyhole"></i> ${T('options.dev.quick.sections','Toutes sections')}</button>
+      <button class="btn btn-sm" id="btnCheatAdvanceMonth"><i class="fa-solid fa-calendar-plus"></i> ${T('options.dev.quick.month','+1 mois')}</button>
+    `)}
     ${optRow(T('options.dev.squad','Effectif & staff'), T('options.dev.squad.desc',"Génère automatiquement un effectif complet et tout le staff pour chaque section active (active aussi Valorant si besoin, place Challenger aléatoire)."), `<button class="btn btn-sm" id="btnCheatGenerateTeam"><i class="fa-solid fa-users-gear"></i> ${T('options.dev.squad.button','Générer équipe + staff')}</button>`)}
     ${(state.vct && state.vct.forfeit) ? optRow(T('options.dev.forfeit','Forfait Valostrike'), T('options.dev.forfeit.desc',"Un forfait a été déclaré pour ce split (effectif incomplet au verrouillage des rosters), reste bloqué jusqu'au split suivant, sauf levée manuelle ici."), `<button class="btn btn-sm" id="btnCheatClearForfeit"><i class="fa-solid fa-flag"></i> ${T('options.dev.forfeit.button','Lever le forfait')}</button>`) : ''}
     ${optRow(T('options.dev.lock.label','Verrouillage'), T('options.dev.relock.desc','Reverrouille l\'accès au mode développeur sur cet appareil (le code sera de nouveau demandé).'), `<button class="btn btn-sm" id="btnDevLock"><i class="fa-solid fa-lock"></i> ${T('options.dev.lock.button','Reverrouiller')}</button>`)}
@@ -11544,7 +11898,7 @@ function renderOptionsPanel(){
   }
   const renderers = {
     audio: renderAudioTab, graphics: renderGraphicsTab, interface: renderInterfaceTab,
-    language: renderLanguageTab, accessibility: renderAccessibilityTab, system: renderSystemTab, cheat: renderCheatTab,
+    language: renderLanguageTab, accessibility: renderAccessibilityTab, system: renderSystemTab, save: renderSaveTab, cheat: renderCheatTab,
   };
   document.getElementById('optionsPanel').innerHTML = (renderers[optionsActiveTab] || renderAudioTab)();
   bindOptionsPanelEvents();
@@ -11553,6 +11907,319 @@ function renderOptionsPanel(){
   // ont donc besoin d'un nouvel appel à chaque fois, contrairement au
   // chrome statique traduit une seule fois au chargement de la page.
   applyI18n();
+}
+
+function closeCustomConfirmModal(el){
+  if(!el) return;
+  el.classList.remove('show');
+  setTimeout(()=> el.remove(), 180);
+}
+
+function openCustomConfirmModal({ title='Confirmation', message='', onConfirm, onCancel, confirmText='OK', cancelText='Annuler', extraButtonText='', extraButtonAction }={}){
+  const existing = document.querySelector('.custom-confirm-overlay');
+  if(existing) closeCustomConfirmModal(existing);
+  const overlay = document.createElement('div');
+  overlay.className = 'custom-confirm-overlay';
+  overlay._customOnCancel = onCancel;
+  overlay._customOnConfirm = onConfirm;
+  const extraButtonHtml = extraButtonText ? `<button class="custom-confirm-btn custom-confirm-btn-ghost" type="button" data-action="extra">${extraButtonText}</button>` : '';
+  overlay.innerHTML = `
+    <div class="custom-confirm-window" role="dialog" aria-modal="true" aria-labelledby="customConfirmTitle">
+      <div class="custom-confirm-title" id="customConfirmTitle">${title}</div>
+      <div class="custom-confirm-body"><p>${message}</p></div>
+      <div class="custom-confirm-actions">
+        ${extraButtonHtml}
+        <button class="custom-confirm-btn custom-confirm-btn-ghost" type="button" data-action="cancel">${cancelText}</button>
+        <button class="custom-confirm-btn custom-confirm-btn-primary" type="button" data-action="confirm">${confirmText}</button>
+      </div>
+    </div>
+  `;
+  const cancelBtn = overlay.querySelector('[data-action="cancel"]');
+  const confirmBtn = overlay.querySelector('[data-action="confirm"]');
+  const extraBtn = overlay.querySelector('[data-action="extra"]');
+  const closeAndRun = (handler)=>{
+    closeCustomConfirmModal(overlay);
+    if(typeof handler === 'function') handler();
+  };
+  cancelBtn.onclick = (e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    closeAndRun(onCancel);
+  };
+  confirmBtn.onclick = (e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    closeAndRun(onConfirm);
+  };
+  if(extraBtn){
+    extraBtn.onclick = (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      closeAndRun(extraButtonAction);
+    };
+  }
+  overlay.addEventListener('click', (e)=>{
+    if(e.target===overlay){
+      e.preventDefault();
+      e.stopPropagation();
+      closeAndRun(onCancel);
+    }
+  });
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=> overlay.classList.add('show'));
+  return overlay;
+}
+
+// Même coquille visuelle que openCustomConfirmModal, avec un champ texte en
+// plus — utilisée pour renommer une sauvegarde ou en nommer une nouvelle,
+// à la place d'un window.prompt() natif qui détonnait avec le reste de
+// l'interface (police, thème, jamais bloquant pour le reste de la page).
+function openTextInputModal({ title='', label='', defaultValue='', placeholder='', confirmText='OK', cancelText='Annuler', onConfirm, onCancel }={}){
+  const existing = document.querySelector('.text-input-modal-overlay');
+  if(existing) closeCustomConfirmModal(existing);
+  const overlay = document.createElement('div');
+  overlay.className = 'custom-confirm-overlay text-input-modal-overlay';
+  overlay.innerHTML = `
+    <div class="custom-confirm-window" role="dialog" aria-modal="true">
+      <div class="custom-confirm-title">${escapeHtml(title)}</div>
+      <div class="custom-confirm-body">
+        ${label ? `<label class="text-input-modal-label" for="textInputModalField">${escapeHtml(label)}</label>` : ''}
+        <input type="text" id="textInputModalField" class="field-input" maxlength="60" placeholder="${escapeHtml(placeholder)}">
+      </div>
+      <div class="custom-confirm-actions">
+        <button class="custom-confirm-btn custom-confirm-btn-ghost" type="button" data-action="cancel">${cancelText}</button>
+        <button class="custom-confirm-btn custom-confirm-btn-primary" type="button" data-action="confirm">${confirmText}</button>
+      </div>
+    </div>
+  `;
+  const field = overlay.querySelector('#textInputModalField');
+  field.value = defaultValue || '';
+  const finish = (handler, value)=>{
+    overlay.classList.remove('show');
+    setTimeout(()=> overlay.remove(), 180);
+    if(typeof handler === 'function') handler(value);
+  };
+  overlay.querySelector('[data-action="cancel"]').onclick = (e)=>{ e.preventDefault(); e.stopPropagation(); finish(onCancel); };
+  overlay.querySelector('[data-action="confirm"]').onclick = (e)=>{ e.preventDefault(); e.stopPropagation(); finish(onConfirm, field.value); };
+  field.addEventListener('keydown', (e)=>{
+    if(e.key==='Enter'){ e.preventDefault(); finish(onConfirm, field.value); }
+    else if(e.key==='Escape'){ e.preventDefault(); finish(onCancel); }
+  });
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay){ finish(onCancel); } });
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=>{ overlay.classList.add('show'); field.focus(); field.select(); });
+  return overlay;
+}
+
+// ---------------------------------------------------------------
+// ÉCRAN "CHARGER UNE PARTIE" — sélecteur de sauvegardes (voir le module
+// SAUVEGARDES MULTIPLES près de hasSave()). Construit entièrement en JS et
+// injecté dans le DOM à l'ouverture (même principe que showErrorDetailsModal
+// plus haut), réutilisable aussi bien depuis le menu principal que depuis
+// Options > Sauvegarde en cours de partie.
+// ---------------------------------------------------------------
+function renderSaveslotRow(slot, selected){
+  return `<li class="saveslot-row${selected?' selected':''}" data-id="${slot.id}">
+    <div class="saveslot-row-main">
+      <span class="saveslot-badge saveslot-badge-${slot.kind}">${slotKindLabel(slot)}</span>
+      <span class="saveslot-row-name">${escapeHtml(slotDisplayName(slot))}</span>
+    </div>
+    <div class="saveslot-row-meta">
+      <span>${new Date(slot.updatedAt).toLocaleDateString()} ${new Date(slot.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span>
+      <span>${formatSaveSize(slot.sizeBytes||0)}</span>
+    </div>
+  </li>`;
+}
+async function openLoadGameModal(){
+  document.getElementById('loadGameModalOverlay')?.remove();
+  await migrateLegacySaveIfNeeded();
+  await migrateLegacyIntoSlotIndex();
+  const list = (await loadSlotsIndex()).slice().sort((a,b)=> b.updatedAt - a.updatedAt);
+  const totalBytes = list.reduce((sum,s)=> sum + (s.sizeBytes||0), 0);
+  const capBytes = 500*1024*1024; // plafond purement indicatif (jamais bloquant, la partie est locale)
+  let selectedId = list.length ? list[0].id : null;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'loadGameModalOverlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-panel saveslot-modal">
+      <h3 style="margin-bottom:12px;display:flex;align-items:center;gap:8px;"><i class="fa-solid fa-floppy-disk"></i> ${T('saveslot.title','Charger une partie')}</h3>
+      <div class="saveslot-storage-line">
+        <span>${formatSaveSize(totalBytes)} ${T('saveslot.storage.used','utilisés')}</span>
+        <div class="saveslot-storage-bar"><div class="saveslot-storage-fill" style="width:${Math.min(100, totalBytes/capBytes*100)}%"></div></div>
+        <button class="btn btn-sm" id="btnCleanupAutoSaves" title="${translatedFallback('saveslot.cleanup.title','Supprime les anciennes sauvegardes automatiques, garde toutes vos sauvegardes/versions manuelles')}"><i class="fa-solid fa-broom"></i> ${T('saveslot.cleanup.button','Nettoyer')}</button>
+      </div>
+      <div class="saveslot-body">
+        <ul class="saveslot-list" id="saveslotList">
+          ${list.length ? list.map(s=>renderSaveslotRow(s, s.id===selectedId)).join('') : `<li class="saveslot-empty">${T('saveslot.empty',"Aucune sauvegarde pour l'instant.")}</li>`}
+        </ul>
+        <div class="saveslot-detail" id="saveslotDetail"></div>
+      </div>
+      <div class="saveslot-actions">
+        <button class="btn btn-sm" id="btnRenameSlot"><i class="fa-solid fa-pen"></i> ${T('saveslot.rename','Renommer')}</button>
+        <button class="btn btn-sm" id="btnDuplicateSlot"><i class="fa-solid fa-clone"></i> ${T('saveslot.duplicate','Dupliquer en nouvelle version')}</button>
+        <button class="btn btn-sm btn-danger" id="btnDeleteSlot"><i class="fa-solid fa-trash"></i> ${T('saveslot.delete','Supprimer')}</button>
+        <div style="flex:1"></div>
+        ${(state && state.org) ? `<button class="btn btn-sm" id="btnCreateNewSave"><i class="fa-solid fa-plus"></i> ${T('saveslot.new','Nouvelle sauvegarde')}</button>` : ''}
+        <button class="btn btn-sm" id="btnCloseSaveslot">${T('saveslot.close','Fermer')}</button>
+        <button class="btn btn-sm btn-primary" id="btnLoadSlot"><i class="fa-solid fa-play"></i> ${T('saveslot.load','Charger')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  if(typeof applyI18n === 'function') applyI18n();
+  overlay.onclick = (e)=>{ if(e.target===overlay) overlay.remove(); };
+  document.getElementById('btnCloseSaveslot').onclick = ()=> overlay.remove();
+
+  function selectedSlot(){ return list.find(s=>s.id===selectedId) || null; }
+  function refreshDetail(){
+    const slot = selectedSlot();
+    const detail = document.getElementById('saveslotDetail');
+    const disable = !slot;
+    ['btnRenameSlot','btnDuplicateSlot','btnDeleteSlot','btnLoadSlot'].forEach(id=>{
+      const btn = document.getElementById(id);
+      if(btn) btn.disabled = disable;
+    });
+    if(!slot){ detail.innerHTML = `<p class="saveslot-detail-empty">${T('saveslot.selectPrompt','Sélectionnez une sauvegarde pour voir son détail.')}</p>`; return; }
+    const d = slot.inGameDate;
+    detail.innerHTML = `
+      <div class="saveslot-detail-name">${escapeHtml(slotDisplayName(slot))}</div>
+      <div class="info-row"><span>${T('saveslot.detail.type','Type')}</span><span><b>${slotKindLabel(slot)}</b></span></div>
+      <div class="info-row"><span>${T('saveslot.detail.date','Date en jeu')}</span><span><b>${d ? `${d.day}/${d.month+1}/${d.year}` : '—'}</b></span></div>
+      <div class="info-row"><span>${T('saveslot.detail.lastSaved','Dernière sauvegarde')}</span><span><b>${new Date(slot.updatedAt).toLocaleString()}</b></span></div>
+      <div class="info-row"><span>${T('saveslot.detail.size','Poids')}</span><span><b>${formatSaveSize(slot.sizeBytes||0)}</b></span></div>
+    `;
+    if(typeof applyI18n === 'function') applyI18n();
+  }
+  function selectRow(id){
+    selectedId = id;
+    document.querySelectorAll('#saveslotList .saveslot-row').forEach(r=> r.classList.toggle('selected', r.dataset.id===id));
+    refreshDetail();
+  }
+  document.querySelectorAll('#saveslotList .saveslot-row').forEach(row=>{ row.onclick = ()=> selectRow(row.dataset.id); });
+  refreshDetail();
+
+  document.getElementById('btnLoadSlot').onclick = ()=>{
+    if(!selectedId) return;
+    const doLoad = async ()=>{
+      overlay.remove();
+      const loaded = await loadState(selectedId);
+      if(loaded){
+        state = loaded; installBudgetGuard();
+        showScreen('screen-dashboard'); initDashboard();
+        if(state.bankrupt){
+          const summary = state.bankruptSummary || { finalBudget:state.budget, durationDays:computeGameDurationDays(), actionsPerformed:state.actionsPerformed||0, cause:`Faillite financière (${formatMoney(BANKRUPTCY_THRESHOLD)})` };
+          freezeGameForBankruptcy();
+          showBankruptcyModal(summary);
+        }
+      } else toast('Impossible de charger cette sauvegarde.', 'error');
+    };
+    if(state && state.org){
+      openCustomConfirmModal({
+        title: 'Charger une autre sauvegarde ?',
+        message: "La partie en cours reste sauvegardée telle quelle et restera disponible ici — seul l'écran actuel sera remplacé par la sauvegarde chargée.",
+        confirmText: 'Charger',
+        cancelText: 'Annuler',
+        onConfirm: doLoad,
+      });
+    } else doLoad();
+  };
+  document.getElementById('btnDeleteSlot').onclick = ()=>{
+    const slot = selectedSlot();
+    if(!slot) return;
+    openCustomConfirmModal({
+      title: 'Supprimer cette sauvegarde ?',
+      message: `« ${escapeHtml(slotDisplayName(slot))} » sera définitivement supprimée.`,
+      confirmText: 'Supprimer',
+      cancelText: 'Annuler',
+      onConfirm: async ()=>{ await deleteSlot(slot.id); overlay.remove(); openLoadGameModal(); },
+    });
+  };
+  document.getElementById('btnRenameSlot').onclick = ()=>{
+    const slot = selectedSlot();
+    if(!slot) return;
+    openTextInputModal({
+      title: 'Renommer cette sauvegarde',
+      label: 'Nom de la sauvegarde',
+      defaultValue: slotDisplayName(slot),
+      confirmText: 'Renommer',
+      onConfirm: (name)=>{
+        if(!(name||'').trim()) return;
+        renameSlot(slot.id, name).then(()=>{ overlay.remove(); openLoadGameModal(); });
+      },
+    });
+  };
+  const createNewSaveBtn = document.getElementById('btnCreateNewSave');
+  if(createNewSaveBtn) createNewSaveBtn.onclick = ()=>{
+    openTextInputModal({
+      title: 'Nouvelle sauvegarde',
+      label: 'Nom de la sauvegarde',
+      defaultValue: (state.org && state.org.name) || '',
+      confirmText: 'Sauvegarder',
+      onConfirm: async (name)=>{
+        if(_saveStatePending) await flushSaveState();
+        const id = await createVersionSlot(name);
+        if(id){ toast('Sauvegarde créée.', 'success'); overlay.remove(); openLoadGameModal(); }
+      },
+    });
+  };
+  document.getElementById('btnDuplicateSlot').onclick = async ()=>{
+    const slot = selectedSlot();
+    if(!slot) return;
+    const raw = await fetchLauncherSaveFile(slotFileName(slot.id));
+    if(!raw){ toast('Impossible de lire cette sauvegarde.', 'error'); return; }
+    const allSlots = await loadSlotsIndex();
+    const nextVersion = 1 + allSlots.filter(s=>s.careerKey===slot.careerKey).reduce((m,s)=> Math.max(m, s.version||1), 0);
+    const id = genSlotId();
+    await writeSlot(id, raw, { kind:'version', version:nextVersion, checkpointType:null, customName:null, createdAt:Date.now() });
+    toast('Nouvelle version créée.', 'success');
+    overlay.remove();
+    openLoadGameModal();
+  };
+  document.getElementById('btnCleanupAutoSaves').onclick = async ()=>{
+    await cleanupOldAutoSlots();
+    toast('Anciennes sauvegardes automatiques nettoyées.', 'success');
+    overlay.remove();
+    openLoadGameModal();
+  };
+}
+
+function quitCurrentGame({ promptForSave = true } = {}){
+  const shouldQuit = () => {
+    const maybeSave = () => {
+      try {
+        if(typeof state !== 'undefined' && state) saveState();
+      } catch (e) {}
+      try {
+        if(typeof flushSaveState === 'function') flushSaveState();
+      } catch (e) {}
+    };
+
+    const finishQuit = ()=>{
+      try { window.close(); } catch (e) {}
+      setTimeout(()=>{
+        toast("Fermez la fenêtre pour quitter — merci d'avoir joué à Esports Director !", 'info');
+      }, 400);
+    };
+
+    if (promptForSave) {
+      openCustomConfirmModal({
+        title: 'Quitter le jeu ?',
+        message: 'Voulez-vous sauvegarder la partie avant de fermer ?',
+        confirmText: 'OK',
+        cancelText: 'Annuler',
+        onConfirm: ()=>{ maybeSave(); finishQuit(); },
+        onCancel: ()=>{}
+      });
+      return;
+    }
+
+    maybeSave();
+    finishQuit();
+  };
+
+  shouldQuit();
 }
 
 function bindOptionsPanelEvents(){
@@ -11569,13 +12236,6 @@ function bindOptionsPanelEvents(){
         case 'optBrightness': pendingSettings.graphics.brightness = val; break;
         case 'optContrast': pendingSettings.graphics.contrast = val; break;
         case 'optMouseSensitivity': pendingSettings.interface.mouseSensitivity = val; break;
-        case 'optCustomTextSize':
-          // Contrairement aux autres curseurs (prévisualisés en direct via
-          // applySettings), la taille du texte ne doit s'appliquer qu'au
-          // clic sur "Appliquer" — zoomer toute l'interface en direct à
-          // chaque pixel de glissement du curseur est désagréable.
-          pendingSettings.accessibility.customTextSize = val;
-          return;
       }
       applySettings(pendingSettings);
     };
@@ -11642,13 +12302,15 @@ function bindOptionsPanelEvents(){
   // cas (elle ne fait rien — retombe silencieusement sur le français
   // affiché — quand aucun dictionnaire n'existe pour la langue choisie).
   document.querySelectorAll('.opt-lang-option').forEach(btn=>{
+    const isAvailable = !btn.classList.contains('disabled') && !btn.disabled;
     btn.onclick = ()=>{
+      if(!isAvailable){
+        toast("Seuls le français et l'anglais sont disponibles pour le moment, les autres langues arrivent bientôt.", 'info');
+        return;
+      }
       pendingSettings.language = btn.dataset.lang;
       document.querySelectorAll('.opt-lang-option').forEach(b=>b.classList.toggle('active', b===btn));
       if(typeof applyI18n==='function') applyI18n(btn.dataset.lang);
-      if(btn.dataset.lang !== 'fr' && btn.dataset.lang !== 'en'){
-        toast("Seuls le français et l'anglais sont disponibles pour le moment, les autres langues arrivent bientôt.", 'info');
-      }
     };
   });
 
@@ -11659,60 +12321,63 @@ function bindOptionsPanelEvents(){
   if(skipTrackBtn) skipTrackBtn.onclick = ()=> skipMenuMusicTrack();
   updateNowPlayingLabel(currentMenuTrack());
 
-  const exportBtn = document.getElementById('btnExportSave');
-  if(exportBtn) exportBtn.onclick = async ()=>{
-    if(_saveStatePending) await flushSaveState(); // écrit d'abord tout changement encore en attente
-    await migrateLegacySaveIfNeeded();
-    let raw = null;
-    try{ raw = await idbGet(SAVE_KEY); }catch(e){}
-    if(!raw){ try{ raw = localStorage.getItem(SAVE_KEY); }catch(e){} }
-    if(!raw){ toast('Aucune sauvegarde à exporter.', 'error'); return; }
-    // Le fichier exporté reste du JSON lisible (jamais la version compressée
-    // stockée en interne), pour rester ouvrable/inspectable et compatible
-    // avec les fichiers exportés par d'anciennes versions du jeu.
-    const json = decodeSaveRaw(raw);
-    const blob = new Blob([json], { type:'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'esports-manager-save.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    toast('Sauvegarde exportée.', 'success');
-  };
-  const importBtn = document.getElementById('btnImportSave');
-  const importInput = document.getElementById('importSaveFile');
-  if(importBtn && importInput){
-    importBtn.onclick = ()=> importInput.click();
-    importInput.onchange = ()=>{
-      const file = importInput.files[0];
-      if(!file) return;
-      const reader = new FileReader();
-      reader.onload = async ()=>{
-        try{
-          JSON.parse(reader.result);
-          // Recompresse avant de stocker, pour que le fichier importé profite
-          // lui aussi de la réduction de taille.
-          const payload = (typeof LZString !== 'undefined') ? LZString.compressToUTF16(reader.result) : reader.result;
-          try{
-            await idbSet(SAVE_KEY, payload);
-            try{ localStorage.removeItem(SAVE_KEY); }catch(e){} // évite qu'un ancien fichier localStorage ne masque l'import
-          }catch(e){
-            localStorage.setItem(SAVE_KEY, payload); // repli si IndexedDB indisponible
-          }
-          toast('Sauvegarde importée ! Utilisez "Continuer" pour la charger.', 'success');
-        }catch(e){ toast('Fichier de sauvegarde invalide.', 'error'); }
-      };
-      reader.readAsText(file);
-    };
-  }
+  // Un seul point d'entrée "Sauvegarder" qui ouvre l'écran des sauvegardes
+  // (voir openLoadGameModal) : on y charge, on y crée une nouvelle
+  // sauvegarde/version, on renomme ou on supprime — plus besoin de boutons
+  // Exporter/Importer séparés ni d'un bouton dédié par action.
+  const openSaveBrowserBtn = document.getElementById('btnOpenSaveBrowser');
+  if(openSaveBrowserBtn) openSaveBrowserBtn.onclick = ()=> openLoadGameModal();
   const backToMenuBtn = document.getElementById('btnBackToMainMenu');
   if(backToMenuBtn) backToMenuBtn.onclick = ()=>{
-    if(state && state.org && !window.confirm('Retourner au menu principal ? Votre partie reste sauvegardée, vous pourrez la reprendre avec "Continuer".')) return;
-    pendingSettings = JSON.parse(JSON.stringify(settings));
-    applySettings(settings);
-    showScreen('screen-mainmenu');
-    initMainMenu();
+    if(!(state && state.org)){
+      pendingSettings = JSON.parse(JSON.stringify(settings));
+      applySettings(settings);
+      showScreen('screen-mainmenu');
+      initMainMenu();
+      return;
+    }
+    openCustomConfirmModal({
+      title: 'Retour au menu principal ?',
+      message: 'Votre partie reste sauvegardée, vous pourrez la reprendre avec "Continuer".',
+      onConfirm: ()=>{
+        pendingSettings = JSON.parse(JSON.stringify(settings));
+        applySettings(settings);
+        try { saveState(); } catch(e) {}
+        showScreen('screen-mainmenu');
+        initMainMenu();
+      }
+    });
   };
+  const saveReturnMenuBtn = document.getElementById('btnSaveReturnMenu');
+  if(saveReturnMenuBtn) saveReturnMenuBtn.onclick = ()=>{
+    const proceedToMenu = ()=>{
+      pendingSettings = JSON.parse(JSON.stringify(settings));
+      applySettings(settings);
+      showScreen('screen-mainmenu');
+      initMainMenu();
+    };
+    if(state && state.org){
+      openCustomConfirmModal({
+        title: 'Retour au menu principal ?',
+        message: 'Voulez-vous sauvegarder la partie avant de quitter l’écran ?',
+        confirmText: 'Retour sans sauvegarder',
+        cancelText: 'Annuler',
+        extraButtonText: 'Sauvegarder',
+        extraButtonAction: ()=>{
+          try { saveState(); } catch (e) {}
+          proceedToMenu();
+        },
+        onConfirm: ()=>{
+          proceedToMenu();
+        },
+        onCancel: ()=>{}
+      });
+      return;
+    }
+    proceedToMenu();
+  };
+  const saveQuitGameBtn = document.getElementById('btnSaveQuitGame');
+  if(saveQuitGameBtn) saveQuitGameBtn.onclick = ()=>{ quitCurrentGame({ promptForSave: true }); };
   const cheatAddMoneyBtn = document.getElementById('btnCheatAddMoney');
   if(cheatAddMoneyBtn) cheatAddMoneyBtn.onclick = ()=>{
     const raw = window.prompt('Montant à ajouter à votre budget (€) :', '100000');
@@ -11729,6 +12394,24 @@ function bindOptionsPanelEvents(){
   };
   const cheatGenerateBtn = document.getElementById('btnCheatGenerateTeam');
   if(cheatGenerateBtn) cheatGenerateBtn.onclick = cheatGenerateSquadAndStaff;
+  const cheatUnlockAllSectionsBtn = document.getElementById('btnCheatUnlockAllSections');
+  if(cheatUnlockAllSectionsBtn) cheatUnlockAllSectionsBtn.onclick = ()=>{
+    const ok = devUnlockAllSections();
+    if(ok){
+      toast('Toutes les sections ont été débloquées.', 'success');
+      saveState();
+      renderTopbar();
+      renderOptionsPanel();
+    }
+  };
+  const cheatAdvanceMonthBtn = document.getElementById('btnCheatAdvanceMonth');
+  if(cheatAdvanceMonthBtn) cheatAdvanceMonthBtn.onclick = ()=>{
+    const ok = devAdvanceMonth(1);
+    if(ok){
+      toast('Le calendrier a été avancé d\'un mois.', 'success');
+      renderOptionsPanel();
+    }
+  };
   const cheatClearForfeitBtn = document.getElementById('btnCheatClearForfeit');
   if(cheatClearForfeitBtn) cheatClearForfeitBtn.onclick = ()=>{
     if(state.vct) state.vct.forfeit = false;
@@ -11815,13 +12498,20 @@ function initOptionsScreen(){
     toast('Modifications annulées.', 'info');
   };
   document.getElementById('btnOptionsReset').onclick = ()=>{
-    if(!window.confirm('Réinitialiser tous les paramètres par défaut ? Cette action est irréversible.')) return;
-    pendingSettings = defaultSettings();
-    settings = JSON.parse(JSON.stringify(pendingSettings));
-    saveSettings(settings);
-    applySettings(settings);
-    renderOptionsPanel();
-    toast('Paramètres réinitialisés.', 'success');
+    openCustomConfirmModal({
+      title: 'Réinitialiser les paramètres ?',
+      message: 'Cette action est irréversible et remettra tous les réglages par défaut.',
+      confirmText: 'Réinitialiser',
+      cancelText: 'Annuler',
+      onConfirm: ()=>{
+        pendingSettings = defaultSettings();
+        settings = JSON.parse(JSON.stringify(pendingSettings));
+        saveSettings(settings);
+        applySettings(settings);
+        renderOptionsPanel();
+        toast('Paramètres réinitialisés.', 'success');
+      }
+    });
   };
 }
 
@@ -11871,173 +12561,8 @@ const STARTING_DIFFICULTY_LEVELS = [
 // image perso possible sans upload, voir le blason qui a le même repli) :
 // juste de quoi donner une identité minimale à "vous" derrière le club.
 const CEO_AVATARS = ['fa-user-tie','fa-user-ninja','fa-user-astronaut','fa-user-graduate','fa-user-secret','fa-user-shield','fa-user-gear','fa-glasses','fa-crown','fa-headset','fa-chess-king','fa-mask'];
-// Passé du manager (vous, pas le club) — remplace l'ancien choix d'icône
-// (grille de glyphes jugée sans intérêt, voir feedback_generic_icon_pickers_disliked)
-// par un VRAI choix mécanique : chaque passé donne un bonus réel appliqué
-// une fois à la création, en plus du scénario de départ (STARTING_DIFFICULTY_LEVELS).
-// bonus.rep est un montant FIXE (petite plage, cohérente quel que soit le
-// scénario) ; bonus.budgetPct/supportersPct sont des POURCENTAGES (ces deux
-// valeurs varient d'un ordre de grandeur selon le scénario choisi — un bonus
-// fixe serait dérisoire sur "Startup ambitieuse" et énorme sur "Repreneur").
-// currentScoutQuality() (voir plus bas dans ce fichier) dérive directement
-// de state.reputation : le bonus de réputation de l'Ex-joueur pro/Ancien
-// scout se répercute donc aussi sur la qualité de scouting de départ, sans
-// avoir besoin d'un second système de bonus dédié.
-// passiveText décrit l'effet mensuel CONTINU de chaque profil (voir
-// tickCeoArchetypePassive plus bas) — en plus du bonus ponctuel ci-dessus,
-// pour que ce choix ne s'épuise pas après le premier jour de la partie.
-const CEO_ARCHETYPES = [
-  { key:'expro', label:'Ex-joueur professionnel', icon:'fa-trophy',
-    desc:"D'ancien joueur compétitif à dirigeant : votre nom est déjà connu du public et de la presse spécialisée.",
-    bonus:{ rep:6 }, factsText:'Réputation de départ +6',
-    passiveText:"Petit regain de réputation chaque mois, tant que vous n'êtes pas déjà une référence" },
-  { key:'analyste', label:'Analyste data & finance', icon:'fa-chart-line',
-    desc:"Formé aux chiffres et aux tableurs plus qu'au terrain : vous savez faire fructifier chaque euro dès le premier jour.",
-    bonus:{ budgetPct:10 }, factsText:'Budget de départ +10%',
-    passiveText:'Optimisation budgétaire discrète chaque mois' },
-  // PAS "Streamer reconverti" (première version) : ça faisait doublon
-  // avec le scénario de départ "Streamer qui se lance" (déjà un profil à
-  // supporters de départ), et devenait carrément contradictoire combiné à
-  // "Startup ambitieuse" (0-500 supporters) — "il y a 2 fois les
-  // streamers ?" signalé. Un métier orienté COMPÉTENCE (faire grandir une
-  // audience par le travail) plutôt qu'un vécu personnel de streamer
-  // fonctionne avec n'importe quel scénario de départ, sans contradiction.
-  { key:'communicant', label:'Spécialiste en communication', icon:'fa-bullhorn',
-    desc:"Campagnes, réseaux sociaux, relations presse : vous savez faire parler de votre organisation, quel que soit le point de départ.",
-    bonus:{ supportersPct:20 }, factsText:'Supporters de départ +20%',
-    passiveText:'Croissance organique des supporters chaque mois' },
-  { key:'polyvalent', label:'Directeur polyvalent', icon:'fa-scale-balanced',
-    desc:"Aucune spécialité marquée, mais une base solide sur tous les plans plutôt qu'un point fort unique.",
-    bonus:{ rep:3, budgetPct:5, supportersPct:10 }, factsText:'Un peu de tout : réputation, budget et supporters',
-    passiveText:'Un peu des trois effets ci-dessus, chaque mois' },
-];
-// Effet mensuel du passé du directeur — appelé depuis le cycle mensuel
-// (voir l'appel juste après tickManagerContractRenewals plus bas), en plus
-// du bonus ponctuel appliqué une seule fois à la création (createOrganization).
-// Montants volontairement modestes (pensés comme un petit avantage constant,
-// pas un moteur de progression à lui seul) : gainReputation() applique déjà
-// son propre amortissement par palier, donc la réputation ne s'envole pas ;
-// budget/supporters sont de petits pourcentages de la valeur ACTUELLE, pas
-// des montants fixes, pour rester proportionnés à n'importe quel stade de
-// la partie sans jamais devenir écrasants ni négligeables.
-function tickCeoArchetypePassive(){
-  if(!state.ceo || !state.ceo.archetype) return;
-  const budgetTrickle = pct=>{
-    const gain = Math.round((state.budget||0) * pct);
-    if(gain>0){ state.budget += gain; recordTransaction('org','other','Optimisation budgétaire (Directeur)', gain); }
-  };
-  const supportersTrickle = pct=>{
-    const gain = Math.round((state.supporters||0) * pct);
-    if(gain>0) state.supporters += gain;
-  };
-  switch(state.ceo.archetype){
-    case 'expro':
-      if((state.reputation||0) < 90) gainReputation(0.5);
-      break;
-    case 'analyste':
-      budgetTrickle(0.003);
-      break;
-    case 'communicant':
-      supportersTrickle(0.004);
-      break;
-    case 'polyvalent':
-      if((state.reputation||0) < 90) gainReputation(0.15);
-      budgetTrickle(0.0012);
-      supportersTrickle(0.0015);
-      break;
-  }
-}
-/* ============================================================
-   CONSEILLER EXÉCUTIF — second personnage clé, généré une seule fois à la
-   création du club (voir createOrganization → state.advisor) et distinct
-   du profil du directeur (VOUS, voir CEO_ARCHETYPES juste au-dessus) : lui
-   a un point de vue et des compétences propres, affichés en jeu plutôt que
-   simplement mentionnés. Réutilise les mêmes viviers que la génération de
-   staff (FIRST_NAMES/LAST_NAMES/NATIONALITIES/genStaffGender) et des noms
-   d'organisations déjà présents ailleurs dans le jeu (CS2_TIER1_TEAMS/
-   RL_TIER1_TEAMS) plutôt que d'inventer un système de noms séparé.
-   ============================================================ */
-const ADVISOR_SPECIALTIES = ['Recrutement','Négociation','Analyse financière','Détection de talents','Développement de staff','Stratégie e-sport','Marketing','Gestion de crise'];
-// Une phrase par spécialité, utilisée pour la force (spécialité à 5) et la
-// faiblesse (spécialité à 2) du profil généré — le texte de personnalité
-// reste donc toujours cohérent avec les notes affichées, jamais tiré à part.
-const ADVISOR_STRENGTH_BY_SPECIALTY = {
-  'Recrutement':"Un carnet d'adresses immense dans le milieu du recrutement — peu de profils lui échappent.",
-  'Négociation':"Sait faire baisser un prix ou monter une offre sans jamais rompre la relation.",
-  'Analyse financière':"Repère un déséquilibre budgétaire avant qu'il ne devienne un vrai problème.",
-  'Détection de talents':"Un œil rare pour repérer un joueur prometteur avant que le marché ne s'en aperçoive.",
-  'Développement de staff':"Sait faire progresser un membre du staff plutôt que de le remplacer au premier signe de faiblesse.",
-  'Stratégie e-sport':"Anticipe les tendances de la scène compétitive avant qu'elles ne deviennent évidentes.",
-  'Marketing':"Sait construire une image de marque qui dépasse les simples résultats sportifs.",
-  'Gestion de crise':"Garde son sang-froid quand tout le monde autour panique.",
-};
-const ADVISOR_WEAKNESS_BY_SPECIALTY = {
-  'Recrutement':"Moins à l'aise pour évaluer un profil hors de son réseau habituel.",
-  'Négociation':"Peut se montrer trop rigide face à un interlocuteur qui refuse de bouger.",
-  'Analyse financière':"Peut perdre du temps à revérifier des chiffres déjà solides, au détriment de la rapidité.",
-  'Détection de talents':"A tendance à sous-estimer un profil trop atypique par rapport aux standards habituels.",
-  'Développement de staff':"Délègue difficilement, au risque de devenir un goulot d'étranglement.",
-  'Stratégie e-sport':"Peut s'attacher trop longtemps à un plan qui ne fonctionne déjà plus.",
-  'Marketing':"Moins inspiré dès qu'il s'agit de communication grand public plutôt que spécialisée.",
-  'Gestion de crise':"A tendance à agir avant d'avoir pris le temps de consulter.",
-};
-const ADVISOR_WORK_STYLES = [
-  "Direct et sans détour : préfère annoncer une mauvaise nouvelle tout de suite plutôt que de l'enrober.",
-  "Méthodique et posé : ne recommande jamais rien sans avoir vérifié les chiffres deux fois.",
-  "Instinctif mais informé : fait confiance à son ressenti de terrain autant qu'aux statistiques.",
-  "Diplomate : cherche toujours la formulation qui fait passer un désaccord sans braquer personne.",
-  "Exigeant : vise haut et le montre, quitte à mettre une pression que tout le monde n'apprécie pas.",
-];
-const ADVISOR_AMBITIONS = [
-  "Être un jour reconnu(e) comme celui ou celle qui a construit un champion du monde depuis rien.",
-  "Prouver qu'une organisation peut durer une décennie sans jamais brader son identité pour un sponsor.",
-  "Devenir une référence citée par les autres organisations quand elles cherchent un modèle à suivre.",
-  "Voir l'académie qu'il/elle a contribué à bâtir devenir la meilleure filière de formation de la scène.",
-  "Ne plus jamais revivre l'échec qui a coûté sa précédente organisation — et le prouver par les résultats.",
-];
-const ADVISOR_VISIONS = [
-  "Le marché va se consolider : moins d'organisations, mais bien plus professionnelles.",
-  "L'avenir appartient à ceux qui diversifient leurs revenus au lieu de dépendre des seuls cashprizes.",
-  "Le contenu et la communauté compteront bientôt autant que les résultats sportifs eux-mêmes.",
-  "La discipline financière fera la différence entre les organisations qui durent et celles qui flambent puis disparaissent.",
-  "Le bien-être du staff et des joueurs est un investissement, pas une dépense annexe.",
-];
-const ADVISOR_REPUTATION_TEXTS = [
-  "Reconnu(e) dans le milieu, sans être une figure médiatique.",
-  "Une référence respectée par ses pairs, peu connue du grand public.",
-  "Encore en train de se faire un nom, mais du talent que les initiés remarquent déjà.",
-];
-function genExecutiveAdvisor(){
-  const specialties = {};
-  ADVISOR_SPECIALTIES.forEach(s=>{ specialties[s] = randInt(3,4); });
-  const shuffled = [...ADVISOR_SPECIALTIES].sort(()=>Math.random()-0.5);
-  const topSpecialty = shuffled[0];
-  const weakSpecialty = shuffled[1];
-  specialties[topSpecialty] = 5;
-  specialties[weakSpecialty] = 2;
-  const orgPool = [...CS2_TIER1_TEAMS, ...RL_TIER1_TEAMS];
-  const pastOrgs = [];
-  while(pastOrgs.length < 2){
-    const pick = choice(orgPool);
-    if(!pastOrgs.includes(pick)) pastOrgs.push(pick);
-  }
-  return {
-    name: `${choice(FIRST_NAMES)} ${choice(LAST_NAMES)}`,
-    gender: genStaffGender(),
-    age: randInt(29,54),
-    nationality: choice(NATIONALITIES),
-    pastOrgs,
-    reputationText: choice(ADVISOR_REPUTATION_TEXTS),
-    specialties, topSpecialty, weakSpecialty,
-    workStyle: choice(ADVISOR_WORK_STYLES),
-    strength: ADVISOR_STRENGTH_BY_SPECIALTY[topSpecialty],
-    weakness: ADVISOR_WEAKNESS_BY_SPECIALTY[weakSpecialty],
-    ambition: choice(ADVISOR_AMBITIONS),
-    vision: choice(ADVISOR_VISIONS),
-  };
-}
 let ngChoice = { color:COLOR_SWATCHES[0], game:null, vctDivision:null, vctTeam:null, vctCost:0, lolLeague:null, gcRegion:null, country:'fr', difficulty:'streamer', logo:null,
-  ceoName:'', ceoAvatar:CEO_AVATARS[0], ceoArchetype:CEO_ARCHETYPES[0].key,
+  ceoName:'', ceoAvatar:CEO_AVATARS[0],
   customLevel: { budget:300000, rep:20, supporters:5000, sponsor:false } };
 // Identité visuelle du manager : premier essai volontairement MINIMAL —
 // un monogramme dérivé du nom (initiales), aucune configuration à faire.
@@ -12627,7 +13152,7 @@ function teamCrestIconHtml(name, sizePx=18){
   // généré à partir du nom — sinon ta ligne dans un classement/bracket
   // affiche un blason différent de celui vu partout ailleurs (barre
   // latérale, tableau de bord...).
-  if(state.org && name===state.org.name) return renderOrgLogoHtml(sizePx, { simplified: sizePx<32 });
+  if(state.org && name===state.org.name) return renderOrgLogoHtml(sizePx);
   const cached = teamLogoCache[name];
   if(cached) return `<img src="${cached}" alt="" style="width:${sizePx}px;height:${sizePx}px;object-fit:contain;border-radius:4px;flex-shrink:0;">`;
   const { shape, icon, color } = proceduralTeamCrestMeta(name);
@@ -12684,16 +13209,23 @@ function generateOrgLogoProposal(moodKeys, keepAccent, keepColors, currentLogo){
     moods: moodKeys,
   };
 }
-// Rendu unifié du blason du joueur, utilisé partout où l'ancien badge
-// texte-couleur (tag sur fond color+"22") s'affichait — sizePx<32 (sidebar)
-// passe automatiquement en rendu simplifié (pas de calque accent, illisible
-// en si petit) sauf si opts.simplified est explicitement forcé. opts.logo
-// permet de prévisualiser un brouillon (Forge d'Identité, avant validation)
-// sans toucher à state.org.logo.
+/* Rendu unifié du blason du joueur, utilisé partout où l'ancien badge
+   texte-couleur (tag sur fond color+"22") s'affichait. opts.logo permet de
+   prévisualiser un brouillon (Forge d'Identité, avant validation) sans
+   toucher à state.org.logo.
+
+   Le rendu ne dépend PLUS de la taille. Avant, tout blason de moins de 32 px
+   basculait en "simplifié" — c'est-à-dire sans son calque d'accent (anneau,
+   bande, moitié...). Résultat : le même club affichait un blason dans la
+   barre du haut (28 px, sans anneau) et un autre sur le tableau de bord
+   (44 px, avec anneau), ce qui se lit comme deux logos différents. Or
+   l'accent est justement la partie la plus reconnaissable de l'identité :
+   un anneau de 2 px reste parfaitement lisible, alors que le voir
+   apparaître et disparaître d'un écran à l'autre, non. */
 function renderOrgLogoHtml(sizePx=32, opts={}){
   const logo = opts.logo || ensureOrgLogo();
   const shapeMeta = LOGO_SHAPES.find(s=>s.key===logo.shape) || LOGO_SHAPES[0];
-  const simplified = opts.simplified!==undefined ? opts.simplified : sizePx<32;
+  const simplified = !!opts.simplified;
   const hoverClass = opts.hover ? 'org-logo-hoverable' : '';
   const c = Math.max(0, Math.min(100, logo.character!==undefined ? logo.character : 50));
   // Le curseur "Caractère" mélange progressivement primaire->accent sur le
@@ -13050,14 +13582,11 @@ function initOrgCountryPicker(){
     });
   }
 }
-// Profil du manager (VOUS, pas l'organisation) — nom optionnel (repli sur
-// le diminutif du club si vide, voir createOrganization) + passé du
-// manager (CEO_ARCHETYPES, un vrai bonus mécanique, voir plus haut). Le
-// choix d'icône parmi CEO_AVATARS a été retiré (grille de glyphes
-// FontAwesome génériques jugée ratée telle quelle, y compris redessinée en
-// médaillons ronds — "retire ça c'est nul") : ngChoice.ceoAvatar garde sa
-// valeur par défaut (CEO_AVATARS[0]), l'icône sert toujours à l'affichage
-// (voir state.ceo.avatar) mais n'est plus un choix.
+// Profil du manager (VOUS, pas l'organisation) — nom optionnel, replié sur
+// le diminutif du club si vide, voir createOrganization. L'icône reste une
+// valeur de repli standard (CEO_AVATARS[0]) et n'est plus un choix à la
+// création, pour garder la page plus simple et éviter ce système de profil
+// additionnel.
 function initCeoProfilePicker(){
   const nameInput = document.getElementById('ceoNameInput');
   const updatePreview = ()=>{
@@ -13069,58 +13598,10 @@ function initCeoProfilePicker(){
     nameInput.oninput = ()=>{ ngChoice.ceoName = nameInput.value; updatePreview(); };
   }
   updatePreview();
-  renderCeoArchetypeGrid();
-  renderAdvisorPreview();
-}
-// Aperçu du Conseiller Exécutif dès l'écran de création (voir
-// genExecutiveAdvisor) : sans ça, le personnage n'apparaissait qu'après la
-// création, sur la page Général — invisible pour quelqu'un qui n'a pas
-// encore lancé la partie ("ce que tu as fais je le vois pas"). Le profil
-// tiré ici (ngChoice.advisorPreview) est repris TEL QUEL par
-// createOrganization, jamais régénéré en silence, pour que ce qu'on
-// prévisualise soit vraiment ce qu'on obtient.
-function renderAdvisorPreview(){
-  if(!ngChoice.advisorPreview) ngChoice.advisorPreview = genExecutiveAdvisor();
-  const a = ngChoice.advisorPreview;
-  const mono = document.getElementById('advisorPreviewMonogram');
-  const nameEl = document.getElementById('advisorPreviewName');
-  const specEl = document.getElementById('advisorPreviewSpecialty');
-  if(mono) mono.innerHTML = renderCeoMonogramHtml(a.name, 40);
-  if(nameEl) nameEl.textContent = a.name;
-  if(specEl) specEl.textContent = `${a.topSpecialty} · ${a.age} ans`;
-  const rerollBtn = document.getElementById('btnRerollAdvisor');
-  if(rerollBtn) rerollBtn.onclick = ()=>{ ngChoice.advisorPreview = genExecutiveAdvisor(); renderAdvisorPreview(); };
-}
-// Même gabarit visuel que renderDifficultyGrid (.difficulty-option) —
-// composant déjà éprouvé sur ce même écran, pas une nouvelle esthétique à
-// faire valider.
-function renderCeoArchetypeGrid(){
-  const grid = document.getElementById('ceoArchetypeGrid');
-  if(!grid) return;
-  grid.innerHTML = '';
-  CEO_ARCHETYPES.forEach(arch=>{
-    const el = document.createElement('div');
-    el.className = 'difficulty-option' + (arch.key===ngChoice.ceoArchetype ? ' selected' : '');
-    el.title = arch.desc;
-    el.innerHTML = `
-      <div class="difficulty-option-head">
-        <div class="difficulty-option-icon"><i class="fa-solid ${arch.icon}"></i></div>
-        <div class="difficulty-option-title">${arch.label}</div>
-      </div>
-      <div class="difficulty-option-facts">${arch.factsText}</div>
-      <div class="difficulty-option-passive"><i class="fa-solid fa-repeat"></i> ${arch.passiveText}</div>
-    `;
-    el.addEventListener('click', ()=>{
-      grid.querySelectorAll('.difficulty-option').forEach(o=>o.classList.remove('selected'));
-      el.classList.add('selected');
-      ngChoice.ceoArchetype = arch.key;
-    });
-    grid.appendChild(el);
-  });
 }
 function initNewGameScreen(){
   ngChoice = { color:COLOR_SWATCHES[0], game:null, vctDivision:null, vctTeam:null, vctCost:0, lolLeague:null, gcRegion:null, country:'fr', difficulty:'streamer', logo:null,
-    ceoName:'', ceoAvatar:CEO_AVATARS[0], ceoArchetype:CEO_ARCHETYPES[0].key, advisorPreview:null,
+    ceoName:'', ceoAvatar:CEO_AVATARS[0],
     customLevel: { budget:300000, rep:20, supporters:5000, sponsor:false } };
 
   document.getElementById('btnBackFromNewGame').onclick = ()=> showScreen('screen-mainmenu');
@@ -13528,17 +14009,16 @@ function createOrganization(){
 
   state = defaultState();
   installBudgetGuard();
+  // Nouvelle carrière = nouveau slot de sauvegarde, jamais celui d'une
+  // partie précédente (voir le module SAUVEGARDES MULTIPLES) — sans ça, une
+  // nouvelle partie écraserait silencieusement la dernière sauvegarde chargée.
+  currentSlotId = genSlotId();
+  setLastSlotId(currentSlotId);
   state.org = { name, tag, color:ngChoice.color, logo: ngChoice.logo || null, country: ngChoice.country || 'fr' };
   // Profil du manager (vous, pas le club) — nom optionnel, replié sur le
   // diminutif si laissé vide plutôt que d'imposer un champ obligatoire de
   // plus sur un écran de création déjà chargé.
-  const ceoArchetype = CEO_ARCHETYPES.find(a=>a.key===ngChoice.ceoArchetype) || CEO_ARCHETYPES[0];
-  state.ceo = { name: (ngChoice.ceoName||'').trim() || tag, avatar: ngChoice.ceoAvatar || CEO_AVATARS[0], archetype: ceoArchetype.key };
-  // Conseiller Exécutif : reprend le profil déjà prévisualisé sur l'écran
-  // de création (voir renderAdvisorPreview) plutôt que d'en tirer un
-  // nouveau en silence — jamais régénéré ensuite, comme le profil du
-  // directeur, il doit rester le même personnage toute la partie.
-  state.advisor = ngChoice.advisorPreview || genExecutiveAdvisor();
+  state.ceo = { name: (ngChoice.ceoName||'').trim() || tag, avatar: ngChoice.ceoAvatar || CEO_AVATARS[0] };
   state.sections = [ngChoice.game];
   state.squads[ngChoice.game] = [];
   state.academies[ngChoice.game] = []; // le centre de formation démarre vide
@@ -13561,15 +14041,6 @@ function createOrganization(){
     state.supporters = randInt(startLevel.supportersRange[0], startLevel.supportersRange[1]);
     state.budget = startLevel.budget;
   }
-  // Bonus du passé du manager (CEO_ARCHETYPES) — appliqué APRÈS le tirage
-  // du scénario de départ, jamais avant : un bonus fixe de réputation
-  // s'additionne simplement, les bonus en % (budget/supporters) doivent
-  // porter sur la valeur déjà tirée pour ce scénario précis, pas sur une
-  // base arbitraire.
-  const ceoBonus = ceoArchetype.bonus || {};
-  if(ceoBonus.rep) state.reputation += ceoBonus.rep;
-  if(ceoBonus.budgetPct) state.budget = Math.round(state.budget * (1 + ceoBonus.budgetPct/100));
-  if(ceoBonus.supportersPct) state.supporters = Math.round(state.supporters * (1 + ceoBonus.supportersPct/100));
   state.sponsor = null; // aucun partenariat déjà signé : voir generateInitialSponsorOffers (4 propositions à choisir)
   state.startingLevel = startLevel.key; // conservé pour référence (fiche du club, actualités)
 
@@ -14394,6 +14865,7 @@ function showErrorDetailsModal(err, context){
 function safeAdvanceDay(){
   try{
     advanceDay();
+    maybeCreateAutoSnapshot();
   }catch(e){
     console.error('[Avancer un jour] erreur interceptée, action arrêtée :', e);
     toast("Une erreur est survenue en avançant le jour, l'action a été arrêtée pour ne pas bloquer la partie.", 'error');
@@ -14495,7 +14967,6 @@ function advanceDay(){
     tickManagerContractRenewals();
     sendManagerMonthlyReport();
     checkManagerBudgetOverrun();
-    tickCeoArchetypePassive();
     sendAcademyProgressReports();
     sendMapPoolAnalysisMail();
     sendPlayerEvaluationReports();
@@ -15098,6 +15569,10 @@ function advanceDay(){
     aiRefillRosterIfNeeded(gameId);
     aiRefillStaffIfNeeded(gameId);
     tickTrainingNeglect(gameId);
+    // Reclasse les cartes d'entraînement selon le niveau réel de l'équipe,
+    // qui bouge chaque jour (entraînement, scrims, patchs) — sauf si le
+    // joueur a repris la main en glissant une ligne lui-même.
+    autoSortMapPriorityIfAuto(gameId);
     if(state.date.day===1){
       declineAgingPlayerAttributes(gameId);
       sendHeadCoachMapReport(gameId);
@@ -20204,6 +20679,22 @@ function minReputationForLevel(level){
   return Math.max(0, Math.round((level-45) * 1.6));
 }
 
+// Plafond salarial maximum qu'un club peut proposer en fonction de sa réputation.
+// Le barème est volontairement strict pour empêcher un petit club de payer des
+// stars mondiales sur un coup de trésorerie ponctuel, sans pour autant rendre
+// la logique absurde à l'échelle amateur / semi-pro.
+function getClubSalaryCapByReputation(reputation = state.reputation || 0){
+  const rep = Math.max(0, Math.min(100, Number(reputation) || 0));
+  if(rep >= 81) return 250000;
+  if(rep >= 61) return 80000;
+  if(rep >= 41) return 30000;
+  if(rep >= 21) return 10000;
+  return 2000;
+}
+function getClubSalaryCap(){
+  return getClubSalaryCapByReputation(state.reputation || 0);
+}
+
 // Génère un nombre pseudo-aléatoire stable (0-1) à partir d'une chaîne :
 // utilisé pour donner à chaque joueur un trait fixe (ne change pas à
 // chaque recalcul/rendu) plutôt qu'un tirage différent à chaque appel.
@@ -22500,22 +22991,19 @@ function renderGeneralPage(){
         <div class="card-grid two">
           <div class="card info-card">
             <h4><i class="fa-solid fa-shield-halved"></i> ${T('general.org.title','Organisation')}</h4>
-            ${state.ceo ? (()=>{
-              // Passé du manager (voir CEO_ARCHETYPES) : absent sur les
-              // sauvegardes antérieures à ce système, d'où le repli sur
-              // 'polyvalent' plutôt qu'un .find() qui renverrait undefined.
-              const arch = CEO_ARCHETYPES.find(a=>a.key===state.ceo.archetype) || CEO_ARCHETYPES.find(a=>a.key==='polyvalent');
-              return `<div class="ceo-card-header">
-                ${renderCeoMonogramHtml(state.ceo.name, 40)}
-                <div>
-                  <div class="ceo-card-name">${escapeHtml(state.ceo.name||'')}</div>
-                  ${arch ? `<div class="ceo-card-archetype">${arch.label}</div>` : ''}
-                  ${arch ? `<div class="ceo-card-passive" title="Effet actif chaque mois"><i class="fa-solid fa-repeat"></i> ${arch.passiveText}</div>` : ''}
-                </div>
-              </div>`;
-            })() : ''}
-            <div class="info-row"><span>${T('general.org.name','Nom')}</span><span>${state.org.name}</span></div>
+            <!-- Le BLASON du club, pas le médaillon à initiales du directeur :
+                 celui-ci s'affichait ici à côté du diminutif, donnant un
+                 troisième visuel d'identité (encore différent des deux autres)
+                 sur une carte intitulée "Organisation". Le directeur a
+                 maintenant sa ligne, comme le reste des informations. -->
+            <div class="ceo-card-header">
+              ${renderOrgLogoHtml(40, {})}
+              <div>
+                <div class="ceo-card-name">${escapeHtml(state.org.name||'')}</div>
+              </div>
+            </div>
             <div class="info-row"><span>${T('general.org.tag','Diminutif')}</span><span>${state.org.tag}</span></div>
+            ${state.ceo ? `<div class="info-row"><span>${T('general.org.director','Directeur')}</span><span>${escapeHtml(state.ceo.name||'')}</span></div>` : ''}
             <div class="info-row"><span>${T('general.org.activeSections','Sections actives')}</span><span>${state.sections.length}</span></div>
             <div class="info-row"><span>${T('general.org.date','Date')}</span><span>${state.date.day} ${MONTH_NAMES[state.date.month]} ${state.date.year}</span></div>
           </div>
@@ -22530,18 +23018,6 @@ function renderGeneralPage(){
         </div>
       </div>
       <div class="ov-side">
-        ${state.advisor ? `
-          <div class="card info-card advisor-card" id="advisorCardBtn" style="cursor:pointer;margin-bottom:16px;">
-            <h4><i class="fa-solid fa-user-tie"></i> Conseiller Exécutif</h4>
-            <div class="ceo-card-header" style="margin-bottom:0;padding-bottom:0;border-bottom:none;">
-              ${renderCeoMonogramHtml(state.advisor.name, 40)}
-              <div>
-                <div class="ceo-card-name">${escapeHtml(state.advisor.name)}</div>
-                <div class="ceo-card-archetype">${escapeHtml(state.advisor.topSpecialty)}</div>
-              </div>
-            </div>
-          </div>
-        ` : ''}
         <div class="section-title" style="margin-top:0;">${T('general.social.title','Réseaux')}</div>
         ${renderSocialWidget(1)}
       </div>
@@ -22555,8 +23031,6 @@ function bindGeneralPageEvents(){
   });
   const moreLink = document.getElementById('socialWidgetMoreLink');
   if(moreLink) moreLink.onclick = (e)=>{ e.preventDefault(); navigateTo('social'); };
-  const advisorCardBtn = document.getElementById('advisorCardBtn');
-  if(advisorCardBtn) advisorCardBtn.onclick = ()=> openAdvisorProfileModal();
   // Cartes Budget/Sponsor cliquables (demande explicite : plus rapide que de
   // repasser par le menu déroulant Finances). Réputation/Supporters restent
   // volontairement informatives — aucune page dédiée n'existe pour elles,
@@ -24813,12 +25287,28 @@ function evaluateStaffOffer(scope, candidate, offerSalary=candidate.salary, bonu
   const minRep = minReputationForLevel(candidate.level);
   const projectScore = scope==='org' ? computeOrgProjectScore() : computeClubProjectScore(scope);
   const eliteBlocked = candidate.level>=85 && state.reputation < minRep-5;
+  const clubSalaryCap = getClubSalaryCap();
   const marketSalary = computeStaffSalary(candidate.level);
   const ratio = offerSalary / (candidate.salary||1); // conservé tel quel : consommé ailleurs (affichage, compat)
   const store = dedicatedStaffStore(scope);
   const incumbent = store ? store[candidate.role] : null;
+  const salaryCapExceeded = Number(offerSalary) > clubSalaryCap;
 
   const factors = []; // { key, delta, reason(text) } — sert au score ET aux raisons affichées
+
+  if(salaryCapExceeded){
+    return {
+      chance:0,
+      minRep,
+      projectScore,
+      eliteBlocked:false,
+      ratio,
+      factors: [{ key:'salaryCap', delta:-100, reason: 'Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.' }],
+      reasons:['Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.'],
+      salaryCapExceeded:true,
+      clubSalaryCap,
+    };
+  }
 
   // 1. ÉCART SALARIAL — comparé à sa propre demande ET au salaire de marché
   // pour son niveau ; en dessous = pénalité progressive, au-dessus = bonus
@@ -24897,13 +25387,16 @@ function evaluateStaffOffer(scope, candidate, offerSalary=candidate.salary, bonu
   // retour façon agent façon FM26 dans la bulle de négociation.
   const reasons = [...factors].sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta)).slice(0,3).map(f=>f.reason);
 
-  return { chance, minRep, projectScore, eliteBlocked, ratio, factors, reasons };
+  return { chance, minRep, projectScore, eliteBlocked, ratio, factors, reasons, salaryCapExceeded:false, clubSalaryCap };
 }
 // Liste des points précis qui bloquent l'offre actuelle — réutilisée pour
 // le feedback en direct ET pour le mail de refus (compatibilité anciennes
 // offres en attente, voir resolveStaffOffer). S'appuie sur les facteurs
 // détaillés d'evaluateStaffOffer (result.reasons) quand disponibles.
 function staffBlockingReasonsList(result, candidate){
+  if(result.salaryCapExceeded){
+    return ['Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.'];
+  }
   if(result.eliteBlocked){
     return [`réputation du club trop faible pour un profil de ce niveau (minimum ${result.minRep}/100 attendu, vous êtes à ${formatReputation(state.reputation)})`];
   }
@@ -25017,8 +25510,8 @@ function renderStaffNegotiationPanel(){
   const severance = incumbent ? Math.round(incumbent.salary*2) : 0;
   const sliderMin = Math.round(candidate.salary*0.6);
   const sliderMax = Math.round(candidate.salary*1.8);
-  const result = evaluateStaffOffer(scope, candidate, offerSalary, bonusClause, staffNegoState.duration);
-  const status = interestStatus(result.chance);
+  const staffOfferResult = evaluateStaffOffer(scope, candidate, offerSalary, bonusClause, staffNegoState.duration);
+  const status = interestStatus(staffOfferResult.chance);
   return `
     <div class="vct-slot-modal-inner nego-pro" style="max-width:1080px;">
       <div class="vct-slot-modal-header">
@@ -25077,7 +25570,7 @@ function renderStaffNegotiationPanel(){
             <div class="opt-note" id="staffNegoSummary">
               <i class="fa-solid fa-circle-info"></i>
               <span>Aucun frais de signature${incumbent?`, seule l'indemnité de départ (${formatMoney(severance)}) s'applique`:''}.
-              ${result.eliteBlocked ? `<br><b style="color:var(--error);">Refus automatique : réputation du club (${formatReputation(state.reputation)}/100) trop faible pour ce profil (minimum ${result.minRep}/100 attendu).</b>` : (state.reputation<result.minRep ? `<br>Réputation attendue par ce profil : ${result.minRep}/100 (vous êtes à ${formatReputation(state.reputation)}).` : '')}</span>
+              ${staffOfferResult.eliteBlocked ? `<br><b style="color:var(--error);">Refus automatique : réputation du club (${formatReputation(state.reputation)}/100) trop faible pour ce profil (minimum ${staffOfferResult.minRep}/100 attendu).</b>` : (state.reputation<staffOfferResult.minRep ? `<br>Réputation attendue par ce profil : ${staffOfferResult.minRep}/100 (vous êtes à ${formatReputation(state.reputation)}).` : '')}</span>
             </div>
           </div>
         </div>
@@ -25108,18 +25601,21 @@ function updateStaffNegoSummary(){
   const store = dedicatedStaffStore(scope);
   const incumbent = store[candidate.role];
   const severance = incumbent ? Math.round(incumbent.salary*2) : 0;
-  const result = evaluateStaffOffer(scope, candidate, offerSalary, bonusClause, staffNegoState.duration);
-  const status = interestStatus(result.chance);
+  const staffOfferResult = evaluateStaffOffer(scope, candidate, offerSalary, bonusClause, staffNegoState.duration);
+  const status = interestStatus(staffOfferResult.chance);
 
   const hintEl = document.getElementById('staffNegoOfferHint');
   if(hintEl) hintEl.textContent = `${formatMoney(offerSalary)}/mois`;
+  if(staffOfferResult.salaryCapExceeded){
+    hintEl.textContent += '  •  Plafond dépassé';
+  }
   const offerValueEl = document.getElementById('staffNegoOfferValue');
   if(offerValueEl && document.activeElement!==offerValueEl) offerValueEl.value = offerSalary;
   const summaryEl = document.getElementById('staffNegoSummary');
   if(summaryEl) summaryEl.innerHTML = `
     <i class="fa-solid fa-circle-info"></i>
     <span>Aucun frais de signature${incumbent?`, seule l'indemnité de départ (${formatMoney(severance)}) s'applique`:''}.
-    ${result.eliteBlocked ? `<br><b style="color:var(--error);">Refus automatique : réputation du club (${formatReputation(state.reputation)}/100) trop faible pour ce profil (minimum ${result.minRep}/100 attendu).</b>` : (state.reputation<result.minRep ? `<br>Réputation attendue par ce profil : ${result.minRep}/100 (vous êtes à ${formatReputation(state.reputation)}).` : '')}</span>
+    ${staffOfferResult.eliteBlocked ? `<br><b style="color:var(--error);">Refus automatique : réputation du club (${formatReputation(state.reputation)}/100) trop faible pour ce profil (minimum ${staffOfferResult.minRep}/100 attendu).</b>` : (state.reputation<staffOfferResult.minRep ? `<br>Réputation attendue par ce profil : ${staffOfferResult.minRep}/100 (vous êtes à ${formatReputation(state.reputation)}).` : '')}</span>
   `;
 }
 function disableStaffNegoInputs(){
@@ -25218,6 +25714,11 @@ function proposeStaffNegoTerms(){
   const store = dedicatedStaffStore(scope);
   const incumbent = store[candidate.role];
   const severance = incumbent ? Math.round(incumbent.salary*2) : 0;
+  const staffOfferResult = evaluateStaffOffer(scope, candidate, offerSalary, bonusClause, staffNegoState.duration);
+  if(staffOfferResult.salaryCapExceeded){
+    toast('Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.', 'error');
+    return;
+  }
   if(state.budget < severance){
     toast(`Budget insuffisant pour l'indemnité de départ (${formatMoney(severance)} nécessaires).`, 'error');
     return;
@@ -25226,8 +25727,7 @@ function proposeStaffNegoTerms(){
   staffNegoState.roundsUsed = (staffNegoState.roundsUsed||0) + 1;
   const feedbackEl = document.getElementById('staffNegoLiveFeedback');
   const sendBtn = document.getElementById('staffNegoSendBtn');
-  const result = evaluateStaffOffer(scope, candidate, offerSalary, bonusClause, staffNegoState.duration);
-  const accepted = Math.random() < result.chance;
+  const accepted = Math.random() < staffOfferResult.chance;
 
   if(accepted){
     staffNegoState.locked = true;
@@ -25242,7 +25742,7 @@ function proposeStaffNegoTerms(){
     return;
   }
 
-  const reasons = staffBlockingReasonsList(result, candidate);
+  const reasons = staffBlockingReasonsList(staffOfferResult, candidate);
   const reasonsText = reasons.length ? reasons.join(', ') + '.' : "les conditions actuelles ne l'ont pas convaincu.";
   const roundsLeft = STAFF_NEGO_MAX_ROUNDS - staffNegoState.roundsUsed;
 
@@ -25283,6 +25783,12 @@ function resolveStaffOffer(offer){
   }
 
   const result = evaluateStaffOffer(offer.scope, candidate, offer.offerSalary, offer.bonusClause, offer.duration || 2);
+  if(result.salaryCapExceeded){
+    pushMail(gameId, { category:'Staff', priority:'medium', sender:'Négociations',
+      subject:`Offre refusée · ${candidate.name}`,
+      body: 'Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.' });
+    return;
+  }
   const accepted = Math.random() < result.chance;
   if(!accepted){
     pushMail(gameId, { category:'Staff', priority:'medium', sender:'Négociations',
@@ -25467,58 +25973,6 @@ function openClubProfileModal(){
       navigateTo('section', el.dataset.jumpSection);
     };
   });
-}
-
-// Fiche du Conseiller Exécutif (voir genExecutiveAdvisor/state.advisor) —
-// même coquille de modal que le reste du jeu (#profileModalBody), lecture
-// seule : aucune action, ce personnage n'est ni recrutable ni licenciable.
-function openAdvisorProfileModal(){
-  const a = state.advisor;
-  if(!a) return;
-  document.getElementById('profileModalBody').innerHTML = `
-    <div class="profile-modal-header">
-      <div class="profile-modal-avatar"><i class="fa-solid fa-user-tie"></i></div>
-      <div>
-        <div class="profile-modal-name">${escapeHtml(a.name)}</div>
-        <div class="profile-modal-sub">Conseiller Exécutif · ${flagImg(a.nationality,14)} ${nationalityName(a.nationality)}</div>
-      </div>
-    </div>
-    <p style="font-size:12.5px;color:var(--text-secondary);font-style:italic;margin-bottom:14px;">${a.reputationText}</p>
-
-    <div class="profile-stat-grid">
-      <div class="profile-stat-card"><div class="profile-stat-label">Âge</div><div class="profile-stat-value">${a.age} ans</div></div>
-      <div class="profile-stat-card"><div class="profile-stat-label">Sexe</div><div class="profile-stat-value" style="font-size:15px;">${a.gender}</div></div>
-      <div class="profile-stat-card" style="grid-column:span 2;"><div class="profile-stat-label">Anciennes organisations</div><div class="profile-stat-value" style="font-size:14px;">${a.pastOrgs.join(' · ')}</div></div>
-    </div>
-
-    <div class="profile-section-title"><i class="fa-solid fa-star"></i> Spécialités</div>
-    ${ADVISOR_SPECIALTIES.map(s=>`
-      <div class="attr-row"><span>${s}</span>${starRating(a.specialties[s],5)}</div>
-    `).join('')}
-
-    <div class="profile-section-title"><i class="fa-solid fa-brain"></i> Personnalité</div>
-    <div class="personality-card">
-      <div class="personality-card-title">Style de travail</div>
-      <div class="personality-card-desc">${a.workStyle}</div>
-    </div>
-    <div class="personality-card">
-      <div class="personality-card-title">Force : ${a.topSpecialty}</div>
-      <div class="personality-card-desc">${a.strength}</div>
-    </div>
-    <div class="personality-card">
-      <div class="personality-card-title">Faiblesse : ${a.weakSpecialty}</div>
-      <div class="personality-card-desc">${a.weakness}</div>
-    </div>
-    <div class="personality-card">
-      <div class="personality-card-title">Ambition personnelle</div>
-      <div class="personality-card-desc">${a.ambition}</div>
-    </div>
-    <div class="personality-card">
-      <div class="personality-card-title">Vision de l'esport</div>
-      <div class="personality-card-desc">${a.vision}</div>
-    </div>
-  `;
-  openProfileModalOverlay();
 }
 
 // Clic sur un nom d'équipe : pour votre propre structure, direction la
@@ -28468,11 +28922,17 @@ function renderMapTrainingFocusView(gameId){
   const priorities = computeMapTrainingPriority(gameId)
     .sort((a,b)=> order.indexOf(a.map)-order.indexOf(b.map));
   const focus = (state.trainingMapFocus||{})[gameId] || null;
+  const auto = isMapPriorityAuto(gameId);
   return `
     <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">Choisissez une carte comme focus d'entraînement : vos scrims se joueront prioritairement dessus, ce qui alimente sa maîtrise réelle plus vite que les autres.</p>
     <p style="color:var(--text-secondary);font-size:12.5px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
       <span><i class="fa-solid fa-arrows-up-down"></i> Glissez-déposez une ligne pour classer vos cartes vous-même, les 2 premières deviennent vos cartes favorites, les 2 suivantes vos cartes fortes, les 2 suivantes vos cartes faibles, le reste à bannir (voir section 4 ci-dessous).</span>
-      <button class="btn btn-sm" id="autoSortMapPriorityBtn" title="Reclasse les cartes du meilleur niveau d'équipe au plus faible"><i class="fa-solid fa-wand-magic-sparkles"></i> Classer automatiquement</button>
+      <span style="display:flex;align-items:center;gap:8px;flex:none;">
+        ${auto
+          ? `<span class="badge badge-blue" title="Les cartes sont reclassées toutes seules chaque jour selon le niveau réel de l'équipe"><i class="fa-solid fa-rotate"></i> Classement automatique</span>`
+          : `<span class="badge" title="Vous avez classé vos cartes vous-même : plus de retri automatique tant que vous ne le réactivez pas"><i class="fa-solid fa-hand"></i> Classement manuel</span>`}
+        <button class="btn btn-sm" id="autoSortMapPriorityBtn" title="${auto?'Reclasse tout de suite, sans attendre le prochain jour':'Reclasse maintenant et réactive le classement automatique quotidien'}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${auto?'Actualiser le classement':'Repasser en automatique'}</button>
+      </span>
     </p>
     ${focus ? `<div class="opt-note" style="margin-bottom:16px;"><i class="fa-solid fa-crosshairs"></i><span>Focus actuel : <b>${focus}</b>${(state.trainingMapFocusAuto||{})[gameId] ? ' <span class="badge badge-blue" style="margin-left:4px;"><i class="fa-solid fa-user-tie"></i> Choisi par l\'Assistant Coach</span>' : ''}. <button class="btn btn-sm" id="clearMapFocusBtn" style="margin-left:10px;">Retirer le focus</button></span></div>` : ''}
     <div class="map-priority-list" style="--map-priority-cols:32px minmax(160px,1.4fr) 110px 170px 190px;">
@@ -32089,8 +32549,12 @@ function bindCoachViewEvents(gameId){
   };
   const autoSortBtn = document.getElementById('autoSortMapPriorityBtn');
   if(autoSortBtn) autoSortBtn.onclick = ()=>{
+    const wasManual = !isMapPriorityAuto(gameId);
+    setMapPriorityAuto(gameId, true); // le bouton rend aussi la main au classement quotidien
     autoSortMapPriority(gameId);
-    toast('Cartes reclassées automatiquement par niveau d\'équipe.', 'success');
+    toast(wasManual
+      ? "Cartes reclassées par niveau d'équipe. Le classement redevient automatique chaque jour."
+      : "Cartes reclassées par niveau d'équipe.", 'success');
     renderSectionPage(gameId, 'strategy');
   };
 }
@@ -32909,11 +33373,36 @@ function reorderMapPriority(gameId, draggedMap, targetMap){
   if(from===-1 || to===-1) return;
   order.splice(from,1);
   order.splice(to,0,draggedMap);
+  // Classer une carte à la main = reprendre la main sur le classement :
+  // sans ça, le retri quotidien automatique (voir autoSortMapPriorityIfAuto)
+  // écraserait l'ordre choisi dès le lendemain. Même convention que le focus
+  // d'entraînement (state.trainingMapFocusAuto).
+  setMapPriorityAuto(gameId, false);
   saveState();
 }
-// Classement automatique (bouton "Classer automatiquement") : évite de
-// devoir glisser-déposer les 7-8 cartes à la main à chaque fois. Trie par
-// niveau d'équipe réel (blended, la même valeur que la colonne "Niveau de
+// Le classement est-il en mode automatique ? Par défaut OUI (aucune valeur
+// enregistrée = auto), pour que les cartes restent triées toutes seules sans
+// que le joueur ait à s'en occuper.
+function isMapPriorityAuto(gameId){
+  state.mapPriorityAuto = state.mapPriorityAuto || {};
+  return state.mapPriorityAuto[gameId] !== false;
+}
+function setMapPriorityAuto(gameId, on){
+  state.mapPriorityAuto = state.mapPriorityAuto || {};
+  state.mapPriorityAuto[gameId] = !!on;
+}
+// Retri quotidien : appelé par la boucle de jour (voir advanceDay) UNIQUEMENT
+// si le joueur n'a pas repris la main en glissant une ligne lui-même. Les
+// niveaux de carte bougent avec l'entraînement, les scrims et les patchs :
+// sans ce retri, le classement se périmait silencieusement.
+function autoSortMapPriorityIfAuto(gameId){
+  if(!isValorantFamily(gameId)) return; // seul Valostrike a une rotation de cartes
+  if(!isMapPriorityAuto(gameId)) return;
+  autoSortMapPriority(gameId);
+}
+// Classement automatique (bouton "Classer automatiquement" + retri quotidien) :
+// évite de devoir glisser-déposer les 7-8 cartes à la main à chaque fois. Trie
+// par niveau d'équipe réel (blended, la même valeur que la colonne "Niveau de
 // l'équipe"/Tier affichée) plutôt que par ROI d'entraînement — cette liste
 // sert à désigner favorites/fortes/faibles/à bannir (section 5), une
 // question de niveau de jeu sur la carte, pas de quelle carte progresserait
@@ -35134,9 +35623,11 @@ function renderNegoBudgetsCard(gameId){
   const el = document.getElementById('negoBudgetsCard');
   if(!el) return;
   const sectionCap = sectionBudget(gameId);
+  const salaryCap = getClubSalaryCap();
   el.innerHTML = `
     <h4><i class="fa-solid fa-sack-dollar"></i> Budgets disponibles</h4>
     <div class="info-row"><span>Trésorerie</span><span><b>${formatMoney(state.budget)}</b></span></div>
+    <div class="info-row"><span>Plafond salarial</span><span><b>${formatMoney(salaryCap)}</b>/mois</span></div>
     ${sectionCap>0 ? `<div class="info-row"><span>Enveloppe ${GAMES[gameId]?GAMES[gameId].name:gameId}</span><span><b>${formatMoney(sectionCap)}</b></span></div>` : ''}
   `;
 }
@@ -35198,6 +35689,8 @@ function computeNegoAcceptance(offer){
   const projectScore = computeClubProjectScore(gameId);
   const expectedHierarchy = expectedHierarchyForPlayer(player, gameId);
   const hierarchyDelta = hierarchyRank(offer.hierarchy || expectedHierarchy) - hierarchyRank(expectedHierarchy);
+  const clubSalaryCap = getClubSalaryCap();
+  const salaryCapExceeded = salary > clubSalaryCap;
   // Une star confirmée refuse net un club dont la réputation est trop en
   // retrait par rapport à son calibre, quelle que soit l'offre financière —
   // sauf s'il fait partie de ceux qui se moquent de la réputation.
@@ -35208,13 +35701,34 @@ function computeNegoAcceptance(offer){
   const academyBonus = (offer.academyOffer && player.age!==undefined && player.age<=21)
     ? 0.10 + Math.max(0, 21-player.age)*0.01 : 0;
 
+  // Plafond salarial du club : même avec un gros budget ponctuel, un petit
+  // club ne peut pas proposer un salaire de superstar sans que sa réputation
+  // lui donne le droit de le faire. Cela évite les achats de stars en mode
+  // coup de trésorerie, tout en laissant un club réputé payer un vrai top
+  // profil à son niveau.
+  if(salaryCapExceeded){
+    return {
+      chance:0,
+      salary,
+      fee,
+      minRep,
+      projectScore,
+      eliteBlocked:false,
+      repIndifferent,
+      expectedHierarchy,
+      hierarchyDelta,
+      salaryCapExceeded:true,
+      clubSalaryCap,
+    };
+  }
+
   // Un contrat d'un an n'engage presque à rien : le salaire proposé est le
   // SEUL frein possible — réputation du club, projet sportif, prime de
   // performance, statut hiérarchique et indemnité de transfert n'entrent
   // plus du tout en ligne de compte pour une offre aussi courte.
   if(offer.duration===1){
     const oneYearChance = Math.max(0.03, Math.min(0.99, 0.65 + (offer.salaryPct-100)/150 + academyBonus));
-    return { chance:oneYearChance, salary, fee, minRep, projectScore, eliteBlocked:false, repIndifferent, expectedHierarchy, hierarchyDelta:0 };
+    return { chance:oneYearChance, salary, fee, minRep, projectScore, eliteBlocked:false, repIndifferent, expectedHierarchy, hierarchyDelta:0, salaryCapExceeded:false, clubSalaryCap };
   }
 
   let chance = 0.5 + academyBonus;
@@ -35233,7 +35747,7 @@ function computeNegoAcceptance(offer){
   chance += (projectScore-50)/300; // impact du projet sportif (effectif, classement, finances)
   chance += Math.max(-0.4, Math.min(0.2, hierarchyDelta*0.1)); // statut promis en dessous/au-dessus de ce qu'il estime mériter
   chance = eliteBlocked ? 0 : Math.max(0.03, Math.min(0.97, chance));
-  return { chance, salary, fee, minRep, projectScore, eliteBlocked, repIndifferent, expectedHierarchy, hierarchyDelta };
+  return { chance, salary, fee, minRep, projectScore, eliteBlocked, repIndifferent, expectedHierarchy, hierarchyDelta, salaryCapExceeded:false, clubSalaryCap };
 }
 
 // Liste des points précis qui bloquent l'offre actuelle — réutilisée à la
@@ -35241,6 +35755,9 @@ function computeNegoAcceptance(offer){
 // (compatibilité avec les anciennes offres en attente, voir resolvePlayerOffer).
 function negoBlockingReasonsList(result, player, offer){
   offer = offer || negoState;
+  if(result.salaryCapExceeded){
+    return ['Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.'];
+  }
   if(result.eliteBlocked){
     return [`la réputation de votre club (${formatReputation(state.reputation)}/100) est trop faible pour un profil de ce calibre (minimum ${result.minRep}/100 attendu)`];
   }
@@ -35403,6 +35920,10 @@ function proposeNegoTerms(){
     }
   }
   const result = computeNegoAcceptance();
+  if(result.salaryCapExceeded){
+    toast('Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.', 'error');
+    return;
+  }
   if(!isRenewal && state.budget < result.fee){ toast(`Budget insuffisant (${formatMoney(result.fee)} nécessaires).`, 'error'); return; }
 
   negoState.roundsUsed = (negoState.roundsUsed||0) + 1;
@@ -35507,6 +36028,10 @@ function resolvePlayerOffer(offer){
     return;
   }
   const result = computeNegoAcceptance(offer);
+  if(result.salaryCapExceeded){
+    sendMail(`Offre refusée · ${playerPseudo(player.name)}`, 'Le statut actuel du club ne permet pas de proposer un salaire aussi élevé.');
+    return;
+  }
   // L'enveloppe de section (voir sectionBudget) reste un plafond indicatif
   // pour le dimensionnement des offres (voir availableBudgetForSection),
   // mais ne bloque plus jamais une dépense à elle seule : si elle est
@@ -38526,6 +39051,14 @@ document.addEventListener('keydown', (e)=>{
   if(document.getElementById('staffFilterModalOverlay')){ closeStaffFilterModal(); return; }
   if(document.getElementById('staffNegoModalOverlay')){ closeStaffNegotiation(); return; }
   if(document.getElementById('trainingModalOverlay')){ closeTrainingModal(); return; }
+  if(document.getElementById('mapAgentModalOverlay')){ closeMapAgentModal(); return; }
+  if(document.getElementById('suggFilterModalOverlay')){ closeSuggestionFilterModal(); return; }
+  if(document.getElementById('mercatoFAFilterModalOverlay')){ closeMercatoFAFilterModal(); return; }
+  // hideAgentPickModal (pas closeAgentPickModal) : Échap doit se comporter
+  // comme un clic sur le ✕/le fond, qui garde la progression du BO pour la
+  // reprendre plus tard, jamais comme un abandon du match.
+  if(document.getElementById('agentPickModalOverlay')){ hideAgentPickModal(); return; }
+  if(document.getElementById('map3DViewerOverlay')){ closeMap3DViewer(); return; }
   const profile = document.getElementById('profileModalOverlay');
   if(profile && profile.classList.contains('open')){ closeProfileModal(); return; }
   if(state && state.activePage === 'team-profile'){ closeTeamProfilePage(); return; }
@@ -38540,12 +39073,54 @@ document.addEventListener('keydown', (e)=>{
   if(lolLeague && lolLeague.classList.contains('active')){ lolLeague.classList.remove('active'); return; }
   const rlRegion = document.getElementById('rlRegionModal');
   if(rlRegion && rlRegion.classList.contains('active')){ rlRegion.classList.remove('active'); return; }
+  const gcRegion = document.getElementById('gcRegionModal');
+  if(gcRegion && gcRegion.classList.contains('active')){ gcRegion.classList.remove('active'); return; }
   const confirmAction = document.getElementById('confirmActionModalOverlay');
   if(confirmAction && confirmAction.style.display!=='none'){ closeConfirmActionModal(); return; }
+  // Popups les plus "hautes" (saisie de texte / confirmation), qui peuvent
+  // être ouvertes PAR-DESSUS une autre fenêtre déjà gérée ci-dessous —
+  // vérifiées avant elle pour se refermer en premier.
+  const textInput = document.querySelector('.text-input-modal-overlay');
+  if(textInput){ textInput.classList.remove('show'); setTimeout(()=> textInput.remove(), 180); return; }
+  const customConfirm = document.querySelector('.custom-confirm-overlay');
+  if(customConfirm){
+    closeCustomConfirmModal(customConfirm);
+    if(typeof customConfirm._customOnCancel === 'function') customConfirm._customOnCancel();
+    return;
+  }
   const patchNotes = document.getElementById('patchNotesModalOverlay');
   if(patchNotes && patchNotes.style.display!=='none'){ closePatchNotesModal(); return; }
   const identityForge = document.getElementById('identityForgeModalOverlay');
   if(identityForge && identityForge.style.display!=='none'){ closeIdentityForgeModal(); return; }
+  const sidebar = document.getElementById('sidebar');
+  if(sidebar && sidebar.classList.contains('open')){
+    sidebar.classList.remove('open');
+    document.getElementById('sidebarOverlay').classList.remove('show');
+    return;
+  }
+  // Toute AUTRE fenêtre modale (écran "Charger une partie", détail
+  // d'erreur, partage Merch, rapport de synergie, résultat de match...) :
+  // ces popups n'ont pas de callback en attente ni d'état à faire retomber
+  // proprement, une simple fermeture suffit — voir .modal-overlay dans
+  // style.css. C'est cette règle générique qui fait qu'une NOUVELLE popup
+  // basée sur .modal-overlay se ferme automatiquement avec Échap sans
+  // rien ajouter ici. Exclus : les popups qui ENCHAÎNENT sur une suite
+  // (veto manuel, avant-match, simulation de match en direct) — les fermer
+  // au mauvais moment romprait le déroulé du match, jamais gérées ici.
+  // Certaines de ces popups (identityForgeModalOverlay,
+  // confirmActionModalOverlay, patchNotesModalOverlay...) restent en
+  // permanence dans le DOM et ne font que se montrer/masquer via
+  // style.display, contrairement aux popups dynamiques créées puis
+  // retirées à l'ouverture/fermeture — document.querySelector prendrait la
+  // première rencontrée dans l'ordre du DOM, masquée ou non. D'où la
+  // vérification explicite de la visibilité réelle (display!=='none') sur
+  // CHAQUE élément trouvé, pas seulement le premier.
+  const genericOverlay = Array.from(document.querySelectorAll('.modal-overlay')).find(el=>
+    getComputedStyle(el).display !== 'none'
+    && el.id!=='liveMatchModalOverlay' && el.id!=='manualVetoModalOverlay'
+    && el.id!=='preMatchModalOverlay' && el.id!=='bankruptcyModalOverlay'
+  );
+  if(genericOverlay){ genericOverlay.remove(); return; }
   // Aucune popup ouverte : dans les écrans de menu (Nouvelle Partie,
   // Options), Échap fait un retour en arrière, comme le bouton "Retour".
   const newGameScreen = document.getElementById('screen-newgame');
